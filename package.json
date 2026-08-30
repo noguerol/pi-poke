@@ -1,0 +1,30 @@
+{
+  "name": "pi-poke",
+  "version": "1.0.0",
+  "description": "Poke for pi: detects long-running tool calls and wakes the model when a context compaction stalls the work turn (common with local models).",
+  "keywords": ["pi-package", "poke", "compaction", "wake-up", "monitoring", "local-models"],
+  "author": "Javier Noguerol <https://github.com/noguerol>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noguerol/pi-poke"
+  },
+  "homepage": "https://github.com/noguerol/pi-poke",
+  "bugs": {
+    "url": "https://github.com/noguerol/pi-poke/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types test/sim-postcompact.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

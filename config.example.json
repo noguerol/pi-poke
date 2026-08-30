@@ -1,0 +1,39 @@
+/**
+ * Poke extension configuration
+ *
+ * Copy to ~/.pi/agent/settings.json or .pi/settings.json (project)
+ *
+ * "poke": {
+ *   "enabled": true,
+ *   "thresholdSeconds": 30,
+ *   "autoAbort": false,
+ *   "autoPoke": true,
+ *   "postCompactPoke": true,
+ *   "postCompactCooldownSeconds": 30,
+ *   "postCompactMaxPokes": 2
+ * }
+ */
+
+// Example configuration for settings.json
+export const pokeConfigExample = {
+  // Enable/disable the extension
+  "poke.enabled": true,
+
+  // Threshold in seconds for a tool call to be considered "long"
+  "poke.thresholdSeconds": 30,
+
+  // Automatically abort when the threshold is exceeded
+  "poke.autoAbort": false,
+
+  // Send a "poke" message to the agent when the threshold is exceeded
+  "poke.autoPoke": true,
+
+  // Resume the turn after a compaction that interrupted the work
+  "poke.postCompactPoke": true,
+
+  // Seconds to wait between post-compaction pokes (anti-loop)
+  "poke.postCompactCooldownSeconds": 30,
+
+  // Maximum number of post-compaction pokes per stall episode
+  "poke.postCompactMaxPokes": 2,
+};
