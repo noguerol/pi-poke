@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.jpeg" alt="poke — wake up the pi agent when it gets stuck" width="100%" />
+  <img src="https://raw.githubusercontent.com/noguerol/pi-poke/main/docs/banner.jpeg" alt="poke — wake up the pi agent when it gets stuck" width="100%" />
 </p>
 
 <h1 align="center">poke</h1>
