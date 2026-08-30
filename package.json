@@ -16,7 +16,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/noguerol/pi-poke/main/docs/preview.jpeg"
   },
   "files": [
     "src"
