@@ -89,9 +89,11 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	let lastRunErrorMessage: string | undefined;
 	let postCompactPokeCount = 0;
 	let lastPostCompactPokeAt = 0;
-	// Incremented on session_start/shutdown/tree to invalidate deferred pokes
-	// (setTimeout) when the session changes.
-	let sessionGeneration = 0;
+	// The session-bound API: the pi captured at load time, or the fresh context
+	// received via withSession() after a session replacement (newSession, fork,
+	// switchSession, /resume). After a replacement the captured pi is stale and
+	// its sendUserMessage is undefined, so deferred work must use this instead.
+	let sessionApi: ExtensionAPI | { sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): Promise<void> } = pi;
 
 	// Persist state in the session
 	function persistState(ctx: ExtensionContext) {
@@ -137,7 +139,6 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		lastRunErrorMessage = undefined;
 		postCompactPokeCount = 0;
 		lastPostCompactPokeAt = 0;
-		sessionGeneration++;
 	}
 
 	// ------------------------------------------------------------------
@@ -553,19 +554,30 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
 		ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
 
-		const generation = sessionGeneration;
 		setTimeout(() => {
-			// The session may have changed or the user may have disabled it meanwhile
-			if (generation !== sessionGeneration) {
-				return;
-			}
+			// The user may have disabled it meanwhile
 			if (!state.enabled || !state.postCompactPoke) {
 				return;
 			}
-			pi.sendUserMessage(message).catch((err: unknown) => {
+			// sessionApi is always bound to the current session (rebound via
+			// withSession on replacements), so a deferred poke targets the live
+			// session even if it changed while the timer was pending.
+			// The pi API types sendUserMessage as void, but the runtime returns a
+			// Promise: guard it so a stale or broken binding cannot crash pi.
+			let result: unknown;
+			try {
+				result = sessionApi.sendUserMessage(message);
+			} catch (err) {
 				const messageText = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
-			});
+				return;
+			}
+			if (result && typeof (result as Promise<void>).catch === "function") {
+				(result as Promise<void>).catch((err: unknown) => {
+					const messageText = err instanceof Error ? err.message : String(err);
+					ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
+				});
+			}
 		}, 300);
 	});
 
