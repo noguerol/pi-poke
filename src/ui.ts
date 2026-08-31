@@ -9,6 +9,7 @@
 //                                for its own settings submenus (e.g. Theme)
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import type { SettingItem } from "@earendil-works/pi-tui";
 
 interface PokeState {
 	enabled: boolean;
@@ -60,7 +61,7 @@ async function showConfigDialog(
 		return;
 	}
 
-	const { Container, Text, Spacer, Input, type SettingItem, SettingsList } = await import("@earendil-works/pi-tui");
+	const { Container, Text, Spacer, Input, SettingsList } = await import("@earendil-works/pi-tui");
 
 	await ctx.ui.custom((tui, theme, _kb, done) => {
 		// ------------------------------------------------------------------
