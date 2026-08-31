@@ -268,6 +268,25 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	// Register the /poke command
 	pi.registerCommand("poke", {
 		description: "Configure auto-poke for long tool calls and the post-compaction wake-up",
+		getArgumentCompletions: (prefix) => {
+			const subs = ["config", "enable", "disable", "status", "threshold", "postcompact"];
+			const first = prefix.trim().split(/\s+/)[0]?.toLowerCase();
+			const second = prefix.trim().split(/\s+/)[1]?.toLowerCase();
+			// After "threshold": suggest a few common values
+			if (first === "threshold" && second !== undefined) {
+				const values = ["10", "30", "60", "120", "300"];
+				const filtered = values.filter((v) => v.startsWith(second));
+				return filtered.map((v) => ({ value: v, label: v }));
+			}
+			// After "postcompact": suggest on/off
+			if (first === "postcompact" && second !== undefined) {
+				const values = ["on", "off"];
+				const filtered = values.filter((v) => v.startsWith(second));
+				return filtered.map((v) => ({ value: v, label: v }));
+			}
+			const filtered = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
+			return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
+		},
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const subcommand = parts[0]?.toLowerCase();

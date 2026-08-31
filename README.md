@@ -157,9 +157,15 @@ All options can live in the `poke` block of `~/.pi/agent/settings.json` (global)
 | `/poke enable` | Enable the extension |
 | `/poke disable` | Disable the extension |
 | `/poke status` | Show current configuration and live state |
-| `/poke config` | Interactive TUI dialog (all options) |
+| `/poke config` | Interactive TUI dialog — all 7 options (toggle keys, free numeric input, fuzzy search) |
 | `/poke threshold <seconds>` | Set the tool-call threshold |
 | `/poke postcompact <on\|off>` | Toggle the post-compaction wake-up |
+
+> 💡 `/poke config` opens pi's native settings dialog (the same `SettingsList`
+> component pi uses for its own settings): Enter/Space cycles toggles, Enter on
+a numeric option opens a free-form input pre-filled with the current value,
+and typing filters options by fuzzy search. All changes persist to the session
+immediately.
 
 Examples:
 
