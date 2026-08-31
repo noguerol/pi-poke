@@ -36,11 +36,14 @@ pi -e src/index.ts
 
 # Test:
 # - Toggle enabled/disabled
-# - Change threshold
+# - Enter on "Tool-call threshold" -> type any number (e.g. 45) + Enter
 # - Toggle auto-abort
 # - Toggle auto-poke
 # - Toggle post-compaction auto-poke
-# - Exit the dialog
+# - Enter on "Post-compaction cooldown" -> type any number (e.g. 45) + Enter
+# - Enter on "Max pokes per episode" -> type any number (e.g. 3) + Enter
+# - Type to fuzzy-search options (e.g. "cooldown")
+# - Esc closes the dialog (or cancels a numeric submenu)
 ```
 
 ### 4. Tool call monitoring
