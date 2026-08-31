@@ -51,7 +51,7 @@ The extension is designed to be **invisible when things work** and **only speak 
 
 | Feature | Description |
 |---|---|
-| ⏱️ **Real-time monitoring** | Checks tool call duration every second; status-bar indicator + notification on breach |
+| ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 poke:on/off`) + notification on breach |
 | 🔴 **Auto-abort** | Optionally aborts a tool call that exceeds the threshold (configurable) |
 | 💬 **Auto-poke** | Sends a steering message to the model when a tool call runs long |
 | 📌 **Post-compaction wake-up** | Detects a compaction that killed the work turn and asks the model to continue |
@@ -166,6 +166,21 @@ All options can live in the `poke` block of `~/.pi/agent/settings.json` (global)
 a numeric option opens a free-form input pre-filled with the current value,
 and typing filters options by fuzzy search. All changes persist to the session
 immediately.
+
+### Footer indicator
+
+Poke keeps a **compact, always-visible status in the footer**: `📌 poke:on`
+(green) when enabled, `📌 poke:off` (dim) when disabled. During activity it
+gains a short transient suffix that disappears when the situation clears:
+
+| Footer | Meaning |
+|---|---|
+| `📌 poke:on` | Enabled, idle |
+| `📌 poke:off` | Disabled (extension loaded) |
+| `📌 poke:on ⏳ bash` | A tool call is running |
+| `📌 poke:on ⚠️ bash 45s` | Tool call exceeded the threshold |
+| `📌 poke:on 👀 post-compact` | Post-compaction wake armed, watching |
+| `📌 poke:on 📤 resume` | Post-compaction poke sent |
 
 Examples:
 

@@ -140,6 +140,22 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		sessionGeneration++;
 	}
 
+	// ------------------------------------------------------------------
+	// Footer status: always visible, compact — 📌 poke:on / 📌 poke:off,
+	// with an optional transient suffix (running tool, warning, watching…)
+	// that falls back to the base state when cleared.
+	// ------------------------------------------------------------------
+	function pokeStatusText(ctx: ExtensionContext, suffix?: string): string {
+		const base = state.enabled
+			? ctx.ui.theme.fg("success", "📌 poke:on")
+			: ctx.ui.theme.fg("dim", "📌 poke:off");
+		return suffix ? `${base} ${suffix}` : base;
+	}
+
+	function setPokeStatus(ctx: ExtensionContext, suffix?: string) {
+		ctx.ui.setStatus("poke", pokeStatusText(ctx, suffix));
+	}
+
 	/**
 	 * Arm the post-compaction wake. Only armed when the compaction interrupted
 	 * in-flight work that should continue:
@@ -163,7 +179,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			tokensBefore: params.tokensBefore,
 			phase: "armed",
 		};
-		ctx.ui.setStatus("poke", ctx.ui.theme.fg("warning", "📌 watching post-compaction"));
+		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "👀 post-compact")));
 	}
 
 	/**
@@ -232,7 +248,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 					const message = `⚠️ Tool call '${tool.toolName}' (${toolCallId}) has been running for ${elapsedSec}s (threshold: ${state.thresholdSeconds}s)`;
 
 					ctx.ui.notify(message, "warning");
-					ctx.ui.setStatus("poke", ctx.ui.theme.fg("warning", `⚠️ ${tool.toolName}: ${elapsedSec}s`));
+					ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", `⚠️ ${tool.toolName} ${elapsedSec}s`)));
 
 					// Auto-abort when enabled
 					if (state.autoAbort) {
@@ -250,9 +266,9 @@ export default function pokeExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			// Clear the status when no tools are running
+			// Restore the base footer status when no tools are running
 			if (runningTools.size === 0) {
-				ctx.ui.setStatus("poke", undefined);
+				setPokeStatus(ctx);
 			}
 		}, 1000); // Check every second
 	}
@@ -302,14 +318,14 @@ export default function pokeExtension(pi: ExtensionAPI) {
 					state.enabled = true;
 					persistState(ctx);
 					ctx.ui.notify("✅ Auto-poke enabled", "success");
-					ctx.ui.setStatus("poke", ctx.ui.theme.fg("success", "✓ poke active"));
+					setPokeStatus(ctx);
 					break;
 
 				case "disable":
 					state.enabled = false;
 					persistState(ctx);
 					ctx.ui.notify("⏸️ Auto-poke disabled", "info");
-					ctx.ui.setStatus("poke", undefined);
+					setPokeStatus(ctx);
 					break;
 
 				case "threshold": {
@@ -374,7 +390,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		});
 
 		if (ctx.mode === "tui") {
-			ctx.ui.setStatus("poke", ctx.ui.theme.fg("dim", `⏳ ${event.toolName}...`));
+			ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("dim", `⏳ ${event.toolName}`)));
 		}
 	});
 
@@ -386,7 +402,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			runningTools.delete(event.toolCallId);
 
 			if (ctx.mode === "tui" && runningTools.size === 0) {
-				ctx.ui.setStatus("poke", undefined);
+				setPokeStatus(ctx);
 			}
 
 			// Notify if it was a long tool call (even though it finished)
@@ -506,7 +522,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			// The work continued and finished fine: nothing to do. A healthy
 			// cycle resets the poke counter for future episodes.
 			postCompactPokeCount = 0;
-			ctx.ui.setStatus("poke", undefined);
+			setPokeStatus(ctx);
 			wake = null;
 			return;
 		}
@@ -516,14 +532,14 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		// broken); a later healthy cycle does reset the counter.
 		const cooldownMs = state.postCompactCooldownSeconds * 1000;
 		if (now - lastPostCompactPokeAt < cooldownMs || postCompactPokeCount >= state.postCompactMaxPokes) {
-			ctx.ui.setStatus("poke", undefined);
+			setPokeStatus(ctx);
 			wake = null;
 			return;
 		}
 
 		// Non-interactive modes: do not restart the agent on our own.
 		if (ctx.mode === "print" || ctx.mode === "json") {
-			ctx.ui.setStatus("poke", undefined);
+			setPokeStatus(ctx);
 			wake = null;
 			return;
 		}
@@ -534,7 +550,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		const message = buildPostCompactPokeMessage(wake);
 		wake = null; // clear before sending to avoid loops
 
-		ctx.ui.setStatus("poke", ctx.ui.theme.fg("warning", "📌 post-compaction poke"));
+		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
 		ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
 
 		const generation = sessionGeneration;
@@ -567,11 +583,10 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 		if (state.enabled) {
 			startMonitoring(ctx);
-			ctx.ui.setStatus("poke", ctx.ui.theme.fg("success", "✓ poke active"));
 		} else {
 			stopMonitoring();
-			ctx.ui.setStatus("poke", undefined);
 		}
+		setPokeStatus(ctx);
 	});
 
 	// Cleanup on session_shutdown
@@ -588,10 +603,9 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 		if (state.enabled) {
 			startMonitoring(ctx);
-			ctx.ui.setStatus("poke", ctx.ui.theme.fg("success", "✓ poke active"));
 		} else {
 			stopMonitoring();
-			ctx.ui.setStatus("poke", undefined);
 		}
+		setPokeStatus(ctx);
 	});
 }
