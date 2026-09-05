@@ -1,9 +1,12 @@
 /**
  * Poke extension for pi
  *
- * Detects tool calls that take too long and notifies the user or aborts
- * execution. Configuration is persisted per session (session entry) with an
- * optional `poke` block in settings.json.
+ * Detects tool calls that take too long and, when the agent is stuck, wakes it
+ * back into action. Poke is silent by default: it only notifies when it
+ * actually enters into action (sends an auto-poke to the model, aborts an
+ * overdue tool, or resumes the turn after a compaction stall). Configuration
+ * is persisted per session (session entry) with an optional `poke` block in
+ * settings.json.
  *
  * Additional case: post-compaction wake-up. With local models (and sometimes
  * remote APIs), when the agent compacts the context mid-turn or after an
@@ -241,29 +244,29 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			for (const [toolCallId, tool] of runningTools.entries()) {
 				const elapsed = now - tool.startTime;
 
-				// Tool call exceeds the threshold
+				// Tool call exceeds the threshold. Poke stays quiet until it really
+				// enters into action: it notifies only when it aborts the tool or
+				// sends an auto-poke. If no action is configured (watch-only), it
+				// merely marks the overdue state in the footer and stays silent —
+				// a tool merely taking long, or completing late, is not news.
 				if (elapsed >= thresholdMs && !tool.notified) {
 					tool.notified = true;
 
 					const elapsedSec = Math.round(elapsed / 1000);
-					const message = `⚠️ Tool call '${tool.toolName}' (${toolCallId}) has been running for ${elapsedSec}s (threshold: ${state.thresholdSeconds}s)`;
-
-					ctx.ui.notify(message, "warning");
 					ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", `⚠️ ${tool.toolName} ${elapsedSec}s`)));
 
 					// Auto-abort when enabled
 					if (state.autoAbort) {
-						ctx.ui.notify(`🔴 Aborting tool call '${tool.toolName}' due to timeout`, "error");
+						ctx.ui.notify(`🔴 Auto-abort: tool call '${tool.toolName}' exceeded the ${state.thresholdSeconds}s threshold`, "error");
 						ctx.abort();
 						runningTools.delete(toolCallId);
-					}
-
-					// Auto-poke when enabled
-					if (state.autoPoke && !state.autoAbort) {
+					} else if (state.autoPoke) {
+						// Auto-poke when enabled
 						const pokeMessage = `[Poke] The tool call '${tool.toolName}' is taking too long (${elapsedSec}s). Is it still in progress?`;
 						pi.sendUserMessage(pokeMessage, { deliverAs: "steer" });
-						ctx.ui.notify(`📌 Auto-poke sent: ${pokeMessage}`, "info");
+						ctx.ui.notify(`📌 Auto-poke sent: is '${tool.toolName}' still in progress?`, "info");
 					}
+					// Watch-only (no action configured): silent — footer only.
 				}
 			}
 
@@ -395,24 +398,15 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	// Monitor tool call ends
+	// Monitor tool call ends. A tool that finished on its own is not poke's
+	// business: if poke intervened (auto-abort / auto-poke) it already notified
+	// at the breach; if it did not, the call completed and the run continues
+	// normally — stay silent instead of warning about the duration.
 	pi.on("tool_execution_end", async (event, ctx) => {
-		const tool = runningTools.get(event.toolCallId);
-		if (tool) {
-			const elapsed = Math.round((Date.now() - tool.startTime) / 1000);
-			runningTools.delete(event.toolCallId);
+		runningTools.delete(event.toolCallId);
 
-			if (ctx.mode === "tui" && runningTools.size === 0) {
-				setPokeStatus(ctx);
-			}
-
-			// Notify if it was a long tool call (even though it finished)
-			if (elapsed >= state.thresholdSeconds && state.enabled) {
-				ctx.ui.notify(
-					`⏱️ Tool call '${event.toolName}' completed after ${elapsed}s (threshold: ${state.thresholdSeconds}s)`,
-					"warning",
-				);
-			}
+		if (ctx.mode === "tui" && runningTools.size === 0) {
+			setPokeStatus(ctx);
 		}
 	});
 

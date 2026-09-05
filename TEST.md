@@ -55,7 +55,17 @@ pi -e src/index.ts
 # Run a long command
 !sleep 10
 
-# A notification should appear after 5s
+# Expected: after ~5s poke ENTERS INTO ACTION (default autoPoke=on):
+#   - the model receives a steer: "[Poke] The tool call 'bash' is taking too long..."
+#   - one notification: "📌 Auto-poke sent..."
+# When the command finishes (~10s) there is NO "completed after" warning —
+# a tool that completes on its own is silent.
+
+# Silent watch-only mode: disable both actions
+/poke config  # auto-poke = no, auto-abort = no
+!sleep 10
+# Expected: NO notification at all. The footer shows "📌 p:on ⚠️ bash 5s"
+# while the tool runs and returns to "📌 p:on" when it completes.
 ```
 
 ### 5. Auto-abort
@@ -66,7 +76,7 @@ pi -e src/index.ts
 # Run a long command
 !sleep 30
 
-# Should abort after 5s
+# Should abort after 5s with one notification: "🔴 Auto-abort: tool call 'bash'..."
 ```
 
 ### 6. Auto-poke
@@ -77,7 +87,7 @@ pi -e src/index.ts
 # Run a long command
 !sleep 15
 
-# Should send a poke message after 5s
+# Should send one poke message after 5s ("📌 Auto-poke sent...")
 ```
 
 ### 7. Session persistence
@@ -202,7 +212,8 @@ npm test
 - [ ] All commands work correctly (`config`, `status`, `enable`, `disable`,
       `threshold`, `postcompact`)
 - [ ] The configuration dialog is usable and includes the post-compaction toggle
-- [ ] Notifications appear at the right time
+- [ ] Notifications appear only when poke enters into action (auto-abort / auto-poke / post-compaction resume)
+- [ ] No notification when a tool completes after the threshold on its own
 - [ ] The status bar shows updated information
 - [ ] Configuration persists across reloads
 - [ ] Configuration from settings.json works (including the new fields)
