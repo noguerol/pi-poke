@@ -51,7 +51,7 @@ The extension is designed to be **invisible when things work** and **only speak 
 
 | Feature | Description |
 |---|---|
-| ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 poke:on/off`) + notification on breach |
+| ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 p:on/off`) + notification on breach |
 | 🔴 **Auto-abort** | Optionally aborts a tool call that exceeds the threshold (configurable) |
 | 💬 **Auto-poke** | Sends a steering message to the model when a tool call runs long |
 | 📌 **Post-compaction wake-up** | Detects a compaction that killed the work turn and asks the model to continue |
@@ -169,18 +169,18 @@ immediately.
 
 ### Footer indicator
 
-Poke keeps a **compact, always-visible status in the footer**: `📌 poke:on`
-(green) when enabled, `📌 poke:off` (dim) when disabled. During activity it
+Poke keeps a **compact, always-visible status in the footer**: `📌 p:on`
+(green) when enabled, `📌 p:off` (dim) when disabled. During activity it
 gains a short transient suffix that disappears when the situation clears:
 
 | Footer | Meaning |
 |---|---|
-| `📌 poke:on` | Enabled, idle |
-| `📌 poke:off` | Disabled (extension loaded) |
-| `📌 poke:on ⏳ bash` | A tool call is running |
-| `📌 poke:on ⚠️ bash 45s` | Tool call exceeded the threshold |
-| `📌 poke:on 👀 post-compact` | Post-compaction wake armed, watching |
-| `📌 poke:on 📤 resume` | Post-compaction poke sent |
+| `📌 p:on` | Enabled, idle |
+| `📌 p:off` | Disabled (extension loaded) |
+| `📌 p:on ⏳ bash` | A tool call is running |
+| `📌 p:on ⚠️ bash 45s` | Tool call exceeded the threshold |
+| `📌 p:on 👀 post-compact` | Post-compaction wake armed, watching |
+| `📌 p:on 📤 resume` | Post-compaction poke sent |
 
 Examples:
 

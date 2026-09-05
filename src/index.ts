@@ -142,14 +142,14 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	}
 
 	// ------------------------------------------------------------------
-	// Footer status: always visible, compact — 📌 poke:on / 📌 poke:off,
+	// Footer status: always visible, compact — 📌 p:on / 📌 p:off,
 	// with an optional transient suffix (running tool, warning, watching…)
 	// that falls back to the base state when cleared.
 	// ------------------------------------------------------------------
 	function pokeStatusText(ctx: ExtensionContext, suffix?: string): string {
 		const base = state.enabled
-			? ctx.ui.theme.fg("success", "📌 poke:on")
-			: ctx.ui.theme.fg("dim", "📌 poke:off");
+			? ctx.ui.theme.fg("success", "📌 p:on")
+			: ctx.ui.theme.fg("dim", "📌 p:off");
 		return suffix ? `${base} ${suffix}` : base;
 	}
 
