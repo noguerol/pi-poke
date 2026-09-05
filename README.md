@@ -108,6 +108,10 @@ After installing, reload extensions:
 /poke status
 ```
 
+When the agent looks stuck at any moment — even with auto-poke off — type
+`/poke` (no arguments) for a **manual poke**: it sends the model a "resume the
+work" message and kicks the turn back into action.
+
 The **post-compaction wake-up is enabled by default** once poke is enabled — nothing else to do. For local-model workflows this is the setting that matters most.
 
 ## Configuration
@@ -154,6 +158,7 @@ All options can live in the `poke` block of `~/.pi/agent/settings.json` (global)
 
 | Command | Description |
 |---|---|
+| `/poke` (no args) | **Manual poke** — send a "resume the work" message to the model when the agent looks stuck or idle. Works even if auto-poke is off; cancels any pending automatic wake |
 | `/poke enable` | Enable the extension |
 | `/poke disable` | Disable the extension |
 | `/poke status` | Show current configuration and live state |
@@ -188,6 +193,7 @@ Examples:
 /poke enable
 /poke threshold 120        # warn only after 2 minutes
 /poke postcompact off      # disable the wake-up (e.g. while debugging)
+/poke                      # manual kick if the agent looks stuck
 /poke status
 ```
 
@@ -214,6 +220,22 @@ tool_execution_end   ──► runningTools.delete(callId) — silent: the tool
 > actual poke action: an auto-abort, an auto-poke sent to the model, or a
 > post-compaction resume. Healthy workflows — even with many slow `bash` calls
 > — stay completely quiet.
+
+### 1b. Manual poke (`/poke`)
+
+Sometimes you can see a stall the heuristics cannot: the agent sits idle in
+the middle of a task. Typing `/poke` with no arguments is the manual override
+— it sends the model a `[Poke] Manual poke from the user… resume the work`
+message:
+
+- **Idle agent** → the message is sent immediately and starts a new turn.
+- **Busy agent** (e.g. a long tool is still running) → the message is queued
+  as a `steer` and delivered once the current assistant turn finishes its tool
+  calls.
+- It works regardless of the `enabled` / `autoPoke` / `postCompactPoke`
+  toggles, and it cancels any pending automatic wake: the user took control.
+
+`/poke status` still shows the configuration.
 
 ### 2. Post-compaction wake-up (state machine)
 
@@ -306,6 +328,20 @@ Aborts bash commands, network calls or accidental infinite processes that run pa
 
 After 2 minutes poke asks the model "is it still in progress?" — a gentle nudge for servers that occasionally stall mid-tool.
 
+### Manual kick when the agent looks stuck
+
+Whatever the configuration, if the agent is sitting idle in the middle of a
+task, kick it:
+
+```bash
+/poke
+```
+
+Sends the model a `[Poke] Manual poke from the user… resume the work where it
+left off` message and starts a new turn. Useful right after the stall scenario
+above when the automatic post-compaction poke already gave up (anti-loop), or
+any time you spot an idle agent before the heuristics do.
+
 ## Troubleshooting & FAQ
 
 **Q: I ran `/poke enable` but nothing happens on long tool calls.**
@@ -341,7 +377,7 @@ pi-poke/
 │   ├── config.ts    # settings.json reader (lazy — only on session restore)
 │   └── ui.ts        # /poke config TUI dialog (lazy — only when opened)
 ├── test/
-│   └── sim-postcompact.ts   # state-machine simulator, 28 assertions, no TUI needed
+│   └── sim-postcompact.ts   # state-machine simulator, 32 assertions, no TUI needed
 ├── docs/            # banner + preview images
 ├── config.example.json
 ├── package.json
@@ -355,7 +391,7 @@ pi-poke/
 ```bash
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "28 passed, 0 failed"
+# Expect: "32 passed, 0 failed"
 ```
 
 The simulator replicates the exact wake-up state machine and validates the key scenarios: the reported stall bug, overflow recovery (success/failure), mid-run compaction, healthy completion, manual compaction, user aborts, anti-loop limits, user-input cancellation, failed compaction, and post-run threshold compaction.

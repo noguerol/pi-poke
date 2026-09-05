@@ -155,10 +155,10 @@ pi
 
 ### 11b. Logic simulator (automated)
 ```bash
-# Runs the state machine in isolation (no TUI) and validates 28 assertions
+# Runs the state machine in isolation (no TUI) and validates 32 assertions
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "28 passed, 0 failed"
+# Expect: "32 passed, 0 failed"
 ```
 
 ### 12. Bug scenario: error after compaction (local model)
@@ -206,11 +206,40 @@ npm test
 2. As soon as the error/compaction appears, type any prompt.
 3. **Expected result:** no poke arrives (the user input cancelled the wake).
 
+## Manual poke
+
+### 18. Manual kick with `/poke`
+```bash
+# Idle agent: just type the bare command
+/poke
+
+# Expected result:
+#   - notification: "📌 Manual poke sent — asking the agent to continue"
+#   - a new turn starts with the message:
+#     "[Poke] Manual poke from the user: the session appeared to be stuck.
+#      Resume the work where it left off..."
+#   - the model resumes the last task (or reports the final state)
+# /poke status still shows the configuration (bare /poke no longer shows it)
+```
+
+### 19. Manual poke while busy (queued as steer)
+1. Start a long task (e.g. `!sleep 60`) and type `/poke` while it runs.
+2. **Expected result:** the poke is queued (`deliverAs: steer`) and the model
+   receives it once the current assistant turn finishes executing its tools.
+
+### 20. Manual poke cancels a pending automatic wake
+1. Force the bug scenario (12) so an automatic post-compaction poke is about
+   to fire, then type `/poke` immediately.
+2. **Expected result:** the manual poke wins — the pending automatic wake is
+   cancelled and only one resume message reaches the model (the one from
+   `/poke`).
+
 ## Acceptance criteria
 
 - [ ] The extension loads without errors
 - [ ] All commands work correctly (`config`, `status`, `enable`, `disable`,
       `threshold`, `postcompact`)
+- [ ] Bare `/poke` sends a manual resume message (idle → immediate; busy → steer)
 - [ ] The configuration dialog is usable and includes the post-compaction toggle
 - [ ] Notifications appear only when poke enters into action (auto-abort / auto-poke / post-compaction resume)
 - [ ] No notification when a tool completes after the threshold on its own
