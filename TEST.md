@@ -55,17 +55,17 @@ pi -e src/index.ts
 # Run a long command
 !sleep 10
 
-# Expected: after ~5s poke ENTERS INTO ACTION (default autoPoke=on):
-#   - the model receives a steer: "[Poke] The tool call 'bash' is taking too long..."
-#   - one notification: "📌 Auto-poke sent..."
-# When the command finishes (~10s) there is NO "completed after" warning —
-# a tool that completes on its own is silent.
+# Expected (default autoPoke=on, autoAbort=off):
+#   - during the run the footer shows "📌 p:on ⚠️ bash 5s" (silent watch)
+#   - NO notification and NO poke: the tool is slow but its run is healthy,
+#     so poke never enters into action (auto-poke is stall-evidence only)
+#   - when the command finishes (~10s) the footer returns to "📌 p:on" —
+#     a tool that completes on its own is always silent
 
-# Silent watch-only mode: disable both actions
+# Watch-only mode (explicitly disable the auto-poke too)
 /poke config  # auto-poke = no, auto-abort = no
 !sleep 10
-# Expected: NO notification at all. The footer shows "📌 p:on ⚠️ bash 5s"
-# while the tool runs and returns to "📌 p:on" when it completes.
+# Expected: NO notification at all, footer ⚠️ marker only, same as above.
 ```
 
 ### 5. Auto-abort
@@ -79,15 +79,20 @@ pi -e src/index.ts
 # Should abort after 5s with one notification: "🔴 Auto-abort: tool call 'bash'..."
 ```
 
-### 6. Auto-poke
+### 6. Auto-poke (stall evidence only)
 ```bash
 # Configure auto-poke (without auto-abort)
 /poke config  # Enable auto-poke, threshold 5s
 
-# Run a long command
-!sleep 15
-
-# Should send one poke message after 5s ("📌 Auto-poke sent...")
+# The auto-poke only fires when a tool call OUTLIVES its interrupted run:
+# the agent settles (idle) with the last run interrupted and a tool still
+# running past the threshold. That requires a real stall (local model that
+# drops the stream mid-tool) — a plain !sleep never triggers it.
+# Reproduce: start a long task with a local model that dies mid-tool, or
+# trust the simulator (scenario 12). Expected when it fires:
+#   - notification: "📌 Auto-poke sent: interrupted run with 'bash' still running"
+#   - the model receives a "[Poke] The tool call 'bash' is still running..."
+#     resume message
 ```
 
 ### 7. Session persistence
@@ -155,10 +160,10 @@ pi
 
 ### 11b. Logic simulator (automated)
 ```bash
-# Runs the state machine in isolation (no TUI) and validates 32 assertions
+# Runs the state machine in isolation (no TUI) and validates 42 assertions
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "32 passed, 0 failed"
+# Expect: "42 passed, 0 failed"
 ```
 
 ### 12. Bug scenario: error after compaction (local model)
@@ -215,10 +220,11 @@ npm test
 
 # Expected result:
 #   - notification: "📌 Manual poke sent — asking the agent to continue"
-#   - a new turn starts with the message:
-#     "[Poke] Manual poke from the user: the session appeared to be stuck.
-#      Resume the work where it left off..."
-#   - the model resumes the last task (or reports the final state)
+#   - a new turn starts; the "[Poke] Manual poke… resume the work where it
+#     left off" text is injected as a SILENT custom message (display:false):
+#     it does NOT appear in the transcript as if the user had typed it, but
+#     the model receives it in context and resumes the last task (or reports
+#     the final state)
 # /poke status still shows the configuration (bare /poke no longer shows it)
 ```
 
@@ -226,6 +232,7 @@ npm test
 1. Start a long task (e.g. `!sleep 60`) and type `/poke` while it runs.
 2. **Expected result:** the poke is queued (`deliverAs: steer`) and the model
    receives it once the current assistant turn finishes executing its tools.
+   No user-looking message appears in the transcript.
 
 ### 20. Manual poke cancels a pending automatic wake
 1. Force the bug scenario (12) so an automatic post-compaction poke is about
@@ -239,10 +246,11 @@ npm test
 - [ ] The extension loads without errors
 - [ ] All commands work correctly (`config`, `status`, `enable`, `disable`,
       `threshold`, `postcompact`)
-- [ ] Bare `/poke` sends a manual resume message (idle → immediate; busy → steer)
+- [ ] Bare `/poke` sends a silent manual resume message (custom message, no transcript pollution)
 - [ ] The configuration dialog is usable and includes the post-compaction toggle
 - [ ] Notifications appear only when poke enters into action (auto-abort / auto-poke / post-compaction resume)
 - [ ] No notification when a tool completes after the threshold on its own
+- [ ] No auto-poke for a slow-but-healthy tool in a live run (stall evidence only)
 - [ ] The status bar shows updated information
 - [ ] Configuration persists across reloads
 - [ ] Configuration from settings.json works (including the new fields)

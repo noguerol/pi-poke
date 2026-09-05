@@ -1,6 +1,6 @@
 {
   "name": "pi-poke",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Poke for pi: detects long-running tool calls and wakes the model when a context compaction stalls the work turn (common with local models).",
   "keywords": [
     "pi-package",
