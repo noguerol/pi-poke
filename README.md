@@ -42,7 +42,7 @@
 
 **poke** is an extension for [pi](https://github.com/earendil-works/pi) that watches for situations where the agent stops making progress and "pokes" it back into action:
 
-1. **Long tool calls** — a tool call (bash, network, file operation) runs far beyond a reasonable threshold. poke notifies you, optionally aborts it, or asks the model whether it is still progressing.
+1. **Long tool calls** — a tool call (bash, network, file operation) runs far beyond a reasonable threshold. poke stays silent while it watches; only when it **enters into action** does it speak up: it can abort the overdue tool (`autoAbort`) or ask the model whether it is still progressing (`autoPoke`). A tool that merely takes long and completes on its own is never reported.
 2. **Post-compaction stalls** — a context compaction interrupts the work turn and the agent never resumes. This is a known failure mode with **local models** (ollama, llama.cpp, llama-server, etc.): the run dies with `Error: This operation was aborted` right after `[compaction]`, and pi sits idle. poke detects the stall and restarts the turn by asking the model to continue.
 
 The extension is designed to be **invisible when things work** and **only speak up when things stall** — with built-in anti-loop safeguards so a broken model cannot trigger a poke storm.
@@ -51,7 +51,7 @@ The extension is designed to be **invisible when things work** and **only speak 
 
 | Feature | Description |
 |---|---|
-| ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 p:on/off`) + notification on breach |
+| ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 p:on/off`). Silent watch: notifies **only when poke acts** (auto-abort / auto-poke / post-compaction resume) |
 | 🔴 **Auto-abort** | Optionally aborts a tool call that exceeds the threshold (configurable) |
 | 💬 **Auto-poke** | Sends a steering message to the model when a tool call runs long |
 | 📌 **Post-compaction wake-up** | Detects a compaction that killed the work turn and asks the model to continue |
@@ -200,13 +200,20 @@ tool_execution_start ──► runningTools[callId] = { start, notified:false }
                               │
                               ▼  every 1s (setInterval)
                          elapsed >= threshold?
-                              │ yes
-                              ├─► notify user (status bar + message)
-                              ├─► autoAbort?  ──► ctx.abort()
-                              └─► autoPoke?   ──► sendUserMessage("still in progress?")
-                              │
-tool_execution_end   ──► runningTools.delete(callId)
+                              │ yes ── footer: 📌 p:on ⚠️ bash 45s (silent watch)
+                              ├─► autoAbort?  ──► notify + ctx.abort()      (action)
+                              └─► autoPoke?   ──► notify + sendUserMessage  (action)
+                              │ both off? → stay silent (watch-only)
+                              ▼
+tool_execution_end   ──► runningTools.delete(callId) — silent: the tool
+                         finished on its own, the run continues normally
 ```
+
+> **Notification policy:** poke never announces observations (a tool *started*,
+> a tool *finished late*). Every user-facing notification corresponds to an
+> actual poke action: an auto-abort, an auto-poke sent to the model, or a
+> post-compaction resume. Healthy workflows — even with many slow `bash` calls
+> — stay completely quiet.
 
 ### 2. Post-compaction wake-up (state machine)
 
@@ -303,6 +310,15 @@ After 2 minutes poke asks the model "is it still in progress?" — a gentle nudg
 
 **Q: I ran `/poke enable` but nothing happens on long tool calls.**
 The threshold might be too high for your workflow, or no tool call has crossed it yet. Check `/poke status`; try `/poke threshold 10` and run `!sleep 15`.
+
+**Q: I ran a slow `bash` command and poke didn't say anything. Is it broken?**
+No. That is by design: a tool that finishes on its own — even after the
+threshold — is not a stall, and poke stays silent. Poke only notifies when it
+enters into action: it aborts an overdue tool (`autoAbort`), sends an auto-poke
+to the model (`autoPoke`), or resumes the turn after a compaction stall. If you
+want the model to be nudged about genuinely long calls, keep `autoPoke` on; if
+you only want the post-compaction wake-up, disable both to watch quietly (the
+footer still marks overdue tools with `⚠️ tool 45s`).
 
 **Q: Why didn't poke fire after my `/compact`?**
 By design. Manual compaction never interrupts work — poke only reacts to *automatic* compaction (threshold/overflow) that cut an in-flight turn.
