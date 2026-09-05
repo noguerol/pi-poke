@@ -4,7 +4,7 @@
  * without needing a TUI session.
  *
  * Run: node --experimental-strip-types test/sim-postcompact.ts
- * Expect: "32 passed, 0 failed"
+ * Expect: "42 passed, 0 failed"
  */
 type Phase = "idle" | "running" | "between_runs";
 type WakePhase = "armed" | "watching";
@@ -79,6 +79,60 @@ class PokeSim {
 		this.lastPostCompactPokeAt = this.now;
 		this.pokes.push("poke");
 		this.wake = null;
+		return true;
+	}
+}
+
+// ============ Orphaned-tool auto-poke ============
+// Mirrors maybePokeOrphanedTool() + the wake-less agent_settled episode reset
+// from src/index.ts: the long-tool auto-poke only fires on real stall evidence
+// (agent idle + last run interrupted + an overdue tool still running).
+class OrphanSim {
+	runPhase: Phase = "idle";
+	lastRunStopReason: string | undefined;
+	lastPokeAt = 0;
+	pokeCount = 0;
+	cooldownMs = 30_000;
+	maxPokes = 2;
+	pokes: string[] = [];
+	now = Date.now();
+	// the overdue tool is still pending; one poke per tool
+	toolPending = false;
+	toolPokeSent = false;
+
+	agent_start() {
+		this.runPhase = "running";
+		this.lastRunStopReason = undefined;
+	}
+	agent_end(stopReason: string) {
+		this.runPhase = "between_runs";
+		this.lastRunStopReason = stopReason;
+	}
+	settle() {
+		this.runPhase = "idle";
+		// wake-less settle: closes the poke episode unless it is an interrupted
+		// stall with an overdue (not yet poked) orphaned tool
+		const stalledOrphan = this.toolPending && !this.toolPokeSent;
+		if (!isInterruptedStopReason(this.lastRunStopReason) || !stalledOrphan) {
+			this.pokeCount = 0;
+		}
+	}
+	toolStart() {
+		this.toolPending = true;
+		this.toolPokeSent = false;
+	}
+	toolEnd() {
+		this.toolPending = false;
+	}
+	monitorTick(): boolean {
+		if (this.runPhase !== "idle") return false;
+		if (!isInterruptedStopReason(this.lastRunStopReason)) return false;
+		if (!this.toolPending || this.toolPokeSent) return false;
+		if (this.now - this.lastPokeAt < this.cooldownMs || this.pokeCount >= this.maxPokes) return false;
+		this.toolPokeSent = true;
+		this.pokeCount++;
+		this.lastPokeAt = this.now;
+		this.pokes.push("poke");
 		return true;
 	}
 }
@@ -238,6 +292,56 @@ console.log("\n[11] Manual /poke (user kick) cancels a pending automatic wake");
 	check("wake cancelled by manual poke", s.wake === null);
 	check("anti-loop counter reset", s.pokeCount === 0);
 	check("settle -> no automatic poke (user took control)", s.settled() === false);
+}
+
+// ============ Scenario 12: orphaned-tool auto-poke ============
+// The run dies while a tool is still running past the threshold -> poke once.
+console.log("\n[12] Auto-poke only on stall evidence (run died with tool pending)");
+{
+	// Healthy slow tool in a live run: never poked
+	const healthy = new OrphanSim();
+	healthy.agent_start();
+	healthy.toolStart();
+	check("healthy run + long tool: no poke (run still alive)", healthy.monitorTick() === false);
+	healthy.toolEnd();
+	healthy.agent_end("stop");
+	healthy.settle();
+	check("healthy completion: no poke", healthy.pokes.length === 0);
+
+	// The stall: run dies interrupted while the tool is still pending
+	const s = new OrphanSim();
+	s.agent_start();
+	s.toolStart();
+	s.agent_end("error");       // run dies mid-tool
+	s.settle();
+	check("settle keeps episode open (stalled orphan)", s.pokeCount === 0);
+	check("idle + interrupted + orphan overdue -> poke", s.monitorTick() === true);
+	check("one poke sent", s.pokes.length === 1);
+	// Same orphan still pending: no second poke (per-tool latch)
+	s.agent_start(); s.agent_end("error"); s.settle();
+	check("same orphan: no re-poke", s.monitorTick() === false);
+	// Tool completes; healthy cycle closes the episode
+	s.toolEnd();
+	s.agent_start(); s.agent_end("stop"); s.settle();
+	check("healthy settle resets the poke budget", s.pokeCount === 0);
+	// New stall episode can poke again
+	s.toolStart();
+	s.agent_end("error"); s.settle();
+	s.now += 31_000;            // cooldown passes
+	check("new episode pokes again", s.monitorTick() === true);
+	check("two pokes total", s.pokes.length === 2);
+
+	// Anti-loop: max pokes per episode with repeated stalled tools
+	const loop = new OrphanSim();
+	for (let i = 0; i < 3; i++) {
+		loop.agent_start();
+		loop.toolStart();
+		loop.agent_end("length");
+		loop.settle();
+		loop.now += 31_000;
+		loop.monitorTick();
+	}
+	check("max 2 pokes per stalled episode", loop.pokes.length === 2);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

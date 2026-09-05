@@ -47,7 +47,10 @@ interface RunningTool {
 	toolCallId: string;
 	toolName: string;
 	startTime: number;
+	/** true once the breach fired (footer ⚠️ marker / auto-abort decision) */
 	notified: boolean;
+	/** true once an auto-poke was sent for this orphaned tool (one shot) */
+	pokeSent: boolean;
 }
 
 /**
@@ -229,6 +232,89 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		].join("\n");
 	}
 
+	/**
+	 * Send a user message through the session-bound API with failure guards.
+	 * Resolves to true when the runtime accepted the message.
+	 */
+	async function sendGuardedUserMessage(
+		content: string,
+		ctx: ExtensionContext,
+		options?: { deliverAs?: "steer" | "followUp" },
+	): Promise<boolean> {
+		try {
+			const result: unknown = (sessionApi as ExtensionAPI).sendUserMessage(content, options);
+			if (result && typeof (result as Promise<void>).catch === "function") {
+				await (result as Promise<void>);
+			}
+			return true;
+		} catch (err) {
+			const messageText = err instanceof Error ? err.message : String(err);
+			ctx.ui.notify(`⚠️ Poke failed: ${messageText}`, "error");
+			return false;
+		}
+	}
+
+	/**
+	 * Auto-poke with real stall evidence. The long-tool monitor never pokes a
+	 * tool merely for running long inside a healthy run — that run will pick
+	 * the result up when the tool completes. It only pokes when the agent has
+	 * fully settled (no automatic retry/continuation left), the last run was
+	 * interrupted (error/aborted/length), and a tool call is STILL running past
+	 * the threshold: that tool's result is orphaned and the work would never
+	 * resume. One poke per tool; anti-loop budget shared with the
+	 * post-compaction wake; skipped when a post-compaction wake is pending.
+	 */
+	function maybePokeOrphanedTool(ctx: ExtensionContext): void {
+		if (!state.enabled || !state.autoPoke || state.autoAbort) {
+			return;
+		}
+		if (wake !== null) {
+			return; // the post-compaction flow owns the recovery
+		}
+		if (runPhase !== "idle") {
+			return; // wait until pi settles (retries / compaction finished)
+		}
+		if (!isInterruptedStopReason(lastRunStopReason)) {
+			return;
+		}
+
+		const now = Date.now();
+		const thresholdMs = state.thresholdSeconds * 1000;
+		const orphan = [...runningTools.values()].find((t) => !t.pokeSent && now - t.startTime >= thresholdMs);
+		if (!orphan) {
+			return;
+		}
+
+		// Anti-loop limits (shared with the post-compaction wake)
+		const cooldownMs = state.postCompactCooldownSeconds * 1000;
+		if (now - lastPostCompactPokeAt < cooldownMs || postCompactPokeCount >= state.postCompactMaxPokes) {
+			return;
+		}
+
+		// Non-interactive modes: never restart the agent on our own
+		if (ctx.mode === "print" || ctx.mode === "json") {
+			return;
+		}
+
+		orphan.pokeSent = true;
+		postCompactPokeCount++;
+		lastPostCompactPokeAt = now;
+
+		const elapsedSec = Math.round((now - orphan.startTime) / 1000);
+		const message = [
+			`[Poke] The tool call '${orphan.toolName}' is still running (${elapsedSec}s), but its run was interrupted and the agent settled without it.`,
+			`Resume the work where it left off: review the current state and continue the last task in progress.`,
+			`If the tool call has actually completed by now, incorporate its result.`,
+		].join("\n");
+
+		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
+		ctx.ui.notify(`📌 Auto-poke sent: interrupted run with '${orphan.toolName}' still running`, "info");
+
+		// The agent is idle (runPhase === "idle"): send immediately. The guards
+		// keep a stale/stale-ish binding from crashing pi.
+		sendGuardedUserMessage(message, ctx);
+	}
+
 	// Start the monitoring interval
 	function startMonitoring(ctx: ExtensionContext) {
 		if (checkInterval) {
@@ -247,30 +333,29 @@ export default function pokeExtension(pi: ExtensionAPI) {
 				const elapsed = now - tool.startTime;
 
 				// Tool call exceeds the threshold. Poke stays quiet until it really
-				// enters into action: it notifies only when it aborts the tool or
-				// sends an auto-poke. If no action is configured (watch-only), it
-				// merely marks the overdue state in the footer and stays silent —
-				// a tool merely taking long, or completing late, is not news.
+				// enters into action: it aborts an overdue tool here (auto-abort)
+				// or, when the run that owned the tool died, sends an auto-poke
+				// from maybePokeOrphanedTool() below. A tool merely taking long in
+				// a healthy run — or completing late — is never announced: the
+				// run picks the result up and continues on its own.
 				if (elapsed >= thresholdMs && !tool.notified) {
 					tool.notified = true;
 
 					const elapsedSec = Math.round(elapsed / 1000);
 					ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", `⚠️ ${tool.toolName} ${elapsedSec}s`)));
 
-					// Auto-abort when enabled
+					// Auto-abort when enabled (opt-in hang protection: abort any
+					// tool that runs past the threshold, healthy run or not)
 					if (state.autoAbort) {
 						ctx.ui.notify(`🔴 Auto-abort: tool call '${tool.toolName}' exceeded the ${state.thresholdSeconds}s threshold`, "error");
 						ctx.abort();
 						runningTools.delete(toolCallId);
-					} else if (state.autoPoke) {
-						// Auto-poke when enabled
-						const pokeMessage = `[Poke] The tool call '${tool.toolName}' is taking too long (${elapsedSec}s). Is it still in progress?`;
-						pi.sendUserMessage(pokeMessage, { deliverAs: "steer" });
-						ctx.ui.notify(`📌 Auto-poke sent: is '${tool.toolName}' still in progress?`, "info");
 					}
-					// Watch-only (no action configured): silent — footer only.
 				}
 			}
+
+			// Auto-poke with stall evidence (only when the run died, see helper)
+			maybePokeOrphanedTool(ctx);
 
 			// Restore the base footer status when no tools are running
 			if (runningTools.size === 0) {
@@ -307,12 +392,15 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		postCompactPokeCount = 0;
 
 		try {
-			// Idle -> send immediately (triggers a new turn). Busy (e.g. a long
-			// tool is still executing) -> queue as a steer, delivered once the
-			// current assistant turn finishes its tool calls.
-			const result: unknown = ctx.isIdle()
-				? sessionApi.sendUserMessage(message)
-				: sessionApi.sendUserMessage(message, { deliverAs: "steer" });
+			// Silent kick: a custom message (display:false) keeps the text out of
+			// the transcript — it does not look like the user typed it — while
+			// still participating in the LLM context. triggerTurn starts a new
+			// response when idle; while busy it is queued as a steer and
+			// delivered once the current assistant turn finishes its tool calls.
+			const result: unknown = (sessionApi as ExtensionAPI).sendMessage(
+				{ customType: "poke", content: message, display: false },
+				{ triggerTurn: true, deliverAs: "steer" },
+			);
 			if (result && typeof (result as Promise<void>).catch === "function") {
 				await (result as Promise<void>);
 			}
@@ -440,6 +528,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			toolName: event.toolName,
 			startTime: Date.now(),
 			notified: false,
+			pokeSent: false,
 		});
 
 		if (ctx.mode === "tui") {
@@ -545,83 +634,107 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		runPhase = "idle";
 
-		if (!state.enabled || !state.postCompactPoke || !wake) {
+		if (!state.enabled) {
 			return;
 		}
 
-		const now = Date.now();
-
-		let shouldPoke = false;
-		if (wake.phase === "armed") {
-			// No turn ever resumed after the compaction: the run died.
-			shouldPoke = true;
-		} else if (wake.phase === "watching") {
-			// The resume turn started but the run ended failed (error or
-			// truncated). An "aborted" here means the user pressed Esc during
-			// the resume: do not poke.
-			shouldPoke = isFailedStopReason(lastRunStopReason);
-		}
-
-		if (!shouldPoke) {
-			// The work continued and finished fine: nothing to do. A healthy
-			// cycle resets the poke counter for future episodes.
-			postCompactPokeCount = 0;
-			setPokeStatus(ctx);
+		// If the user disabled the post-compaction wake after it was armed,
+		// drop the pending wake (a dangling wake would block orphan pokes).
+		if (wake && !state.postCompactPoke) {
 			wake = null;
-			return;
 		}
 
-		// Anti-loop limits: they apply only to real pokes. If we poked recently
-		// or ran out of attempts, stop insisting (the local model might be truly
-		// broken); a later healthy cycle does reset the counter.
-		const cooldownMs = state.postCompactCooldownSeconds * 1000;
-		if (now - lastPostCompactPokeAt < cooldownMs || postCompactPokeCount >= state.postCompactMaxPokes) {
-			setPokeStatus(ctx);
-			wake = null;
-			return;
-		}
+		// Post-compaction wake decision (unchanged): when a wake is armed and
+		// auto-poke for it is on, decide here whether the interrupted turn needs
+		// a poke or the work recovered on its own.
+		if (wake && state.postCompactPoke) {
+			const now = Date.now();
 
-		// Non-interactive modes: do not restart the agent on our own.
-		if (ctx.mode === "print" || ctx.mode === "json") {
-			setPokeStatus(ctx);
-			wake = null;
-			return;
-		}
+			let shouldPoke = false;
+			if (wake.phase === "armed") {
+				// No turn ever resumed after the compaction: the run died.
+				shouldPoke = true;
+			} else if (wake.phase === "watching") {
+				// The resume turn started but the run ended failed (error or
+				// truncated). An "aborted" here means the user pressed Esc during
+				// the resume: do not poke.
+				shouldPoke = isFailedStopReason(lastRunStopReason);
+			}
 
-		postCompactPokeCount++;
-		lastPostCompactPokeAt = now;
-
-		const message = buildPostCompactPokeMessage(wake);
-		wake = null; // clear before sending to avoid loops
-
-		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
-		ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
-
-		setTimeout(() => {
-			// The user may have disabled it meanwhile
-			if (!state.enabled || !state.postCompactPoke) {
+			if (!shouldPoke) {
+				// The work continued and finished fine: nothing to do. A healthy
+				// cycle resets the poke counter for future episodes.
+				postCompactPokeCount = 0;
+				setPokeStatus(ctx);
+				wake = null;
 				return;
 			}
-			// sessionApi is always bound to the current session (rebound via
-			// withSession on replacements), so a deferred poke targets the live
-			// session even if it changed while the timer was pending.
-			// The pi API types sendUserMessage as void, but the runtime returns a
-			// Promise: guard it so a stale or broken binding cannot crash pi.
-			let result: unknown;
-			try {
-				result = sessionApi.sendUserMessage(message);
-			} catch (err) {
-				const messageText = err instanceof Error ? err.message : String(err);
-				ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
+
+			// Anti-loop limits: they apply only to real pokes. If we poked recently
+			// or ran out of attempts, stop insisting (the local model might be truly
+			// broken); a later healthy cycle does reset the counter.
+			const cooldownMs = state.postCompactCooldownSeconds * 1000;
+			if (now - lastPostCompactPokeAt < cooldownMs || postCompactPokeCount >= state.postCompactMaxPokes) {
+				setPokeStatus(ctx);
+				wake = null;
 				return;
 			}
-			if (result && typeof (result as Promise<void>).catch === "function") {
-				(result as Promise<void>).catch((err: unknown) => {
+
+			// Non-interactive modes: do not restart the agent on our own.
+			if (ctx.mode === "print" || ctx.mode === "json") {
+				setPokeStatus(ctx);
+				wake = null;
+				return;
+			}
+
+			postCompactPokeCount++;
+			lastPostCompactPokeAt = now;
+
+			const message = buildPostCompactPokeMessage(wake);
+			wake = null; // clear before sending to avoid loops
+
+			ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
+			ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
+
+			setTimeout(() => {
+				// The user may have disabled it meanwhile
+				if (!state.enabled || !state.postCompactPoke) {
+					return;
+				}
+				// sessionApi is always bound to the current session (rebound via
+				// withSession on replacements), so a deferred poke targets the live
+				// session even if it changed while the timer was pending.
+				// The pi API types sendUserMessage as void, but the runtime returns a
+				// Promise: guard it so a stale or broken binding cannot crash pi.
+				let result: unknown;
+				try {
+					result = sessionApi.sendUserMessage(message);
+				} catch (err) {
 					const messageText = err instanceof Error ? err.message : String(err);
 					ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
-				});
-			}
-		}, 300);
+					return;
+				}
+				if (result && typeof (result as Promise<void>).catch === "function") {
+					(result as Promise<void>).catch((err: unknown) => {
+						const messageText = err instanceof Error ? err.message : String(err);
+						ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
+					});
+				}
+			}, 300);
+			return;
+		}
+
+		// No wake pending. A settle closes the poke episode unless it is an
+		// interrupted stall with an overdue tool still running — that orphaned
+		// tool is poked by the monitor interval (maybePokeOrphanedTool) under
+		// the same anti-loop budget on its next tick.
+		const thresholdMs = state.thresholdSeconds * 1000;
+		const hasStalledOrphan = [...runningTools.values()].some(
+			(t) => !t.pokeSent && Date.now() - t.startTime >= thresholdMs,
+		);
+		if (!isInterruptedStopReason(lastRunStopReason) || !hasStalledOrphan) {
+			postCompactPokeCount = 0;
+		}
 	});
 
 	// The user (or another extension) sent input: they took control, cancel wake

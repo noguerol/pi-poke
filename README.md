@@ -42,7 +42,7 @@
 
 **poke** is an extension for [pi](https://github.com/earendil-works/pi) that watches for situations where the agent stops making progress and "pokes" it back into action:
 
-1. **Long tool calls** — a tool call (bash, network, file operation) runs far beyond a reasonable threshold. poke stays silent while it watches; only when it **enters into action** does it speak up: it can abort the overdue tool (`autoAbort`) or ask the model whether it is still progressing (`autoPoke`). A tool that merely takes long and completes on its own is never reported.
+1. **Long tool calls** — a tool call (bash, network, file operation) runs far beyond a reasonable threshold. poke stays silent while it watches; only when it **enters into action** does it speak up: it can abort the overdue tool (`autoAbort`) or, when the run that owned the tool died with it still running, ask the model to resume the orphaned work (`autoPoke`). A tool that merely takes long and completes on its own is never reported.
 2. **Post-compaction stalls** — a context compaction interrupts the work turn and the agent never resumes. This is a known failure mode with **local models** (ollama, llama.cpp, llama-server, etc.): the run dies with `Error: This operation was aborted` right after `[compaction]`, and pi sits idle. poke detects the stall and restarts the turn by asking the model to continue.
 
 The extension is designed to be **invisible when things work** and **only speak up when things stall** — with built-in anti-loop safeguards so a broken model cannot trigger a poke storm.
@@ -53,7 +53,7 @@ The extension is designed to be **invisible when things work** and **only speak 
 |---|---|
 | ⏱️ **Real-time monitoring** | Checks tool call duration every second; compact footer indicator (`📌 p:on/off`). Silent watch: notifies **only when poke acts** (auto-abort / auto-poke / post-compaction resume) |
 | 🔴 **Auto-abort** | Optionally aborts a tool call that exceeds the threshold (configurable) |
-| 💬 **Auto-poke** | Sends a steering message to the model when a tool call runs long |
+| 💬 **Auto-poke** | Sends a resume message when a tool call outlives its run (agent settled, run interrupted, tool still running past the threshold) |
 | 📌 **Post-compaction wake-up** | Detects a compaction that killed the work turn and asks the model to continue |
 | 🛡️ **Anti-loop safeguards** | Cooldown + max-pokes-per-episode prevent poke storms with broken models |
 | 🧠 **Context-aware** | Never pokes after manual `/compact`, user aborts (Esc), or runs that finish fine |
@@ -131,7 +131,7 @@ All options can live in the `poke` block of `~/.pi/agent/settings.json` (global)
 | `enabled` | `boolean` | `false` | Master switch for the whole extension |
 | `thresholdSeconds` | `number` | `30` | A tool call running longer than this is considered "long" |
 | `autoAbort` | `boolean` | `false` | Abort the tool call when the threshold is exceeded |
-| `autoPoke` | `boolean` | `true` | Send a steering message when a tool call runs long |
+| `autoPoke` | `boolean` | `true` | Send a resume message only when a tool call outlives its run (agent settled, last run interrupted, tool still running past the threshold) |
 | `postCompactPoke` | `boolean` | `true` | Enable the post-compaction wake-up |
 | `postCompactCooldownSeconds` | `number` | `30` | Minimum seconds between post-compaction pokes (anti-loop) |
 | `postCompactMaxPokes` | `number` | `2` | Max pokes per stall episode (anti-loop) |
@@ -202,18 +202,30 @@ Examples:
 ### 1. Long tool call monitoring
 
 ```
-tool_execution_start ──► runningTools[callId] = { start, notified:false }
+tool_execution_start ──► runningTools[callId] = { start, notified:false, pokeSent:false }
                               │
                               ▼  every 1s (setInterval)
                          elapsed >= threshold?
                               │ yes ── footer: 📌 p:on ⚠️ bash 45s (silent watch)
-                              ├─► autoAbort?  ──► notify + ctx.abort()      (action)
-                              └─► autoPoke?   ──► notify + sendUserMessage  (action)
-                              │ both off? → stay silent (watch-only)
+                              └─► autoAbort?  ──► notify + ctx.abort()      (action)
+                              │ (auto-poke is NOT fired here — a tool merely
+                              │  running long in a healthy run is not a stall)
+                              │
+                              ▼  stall evidence check (see below)
+                         agent settled (idle) + last run interrupted
+                         + a tool STILL running past the threshold?
+                              │ yes ──► auto-poke: notify + sendUserMessage (action)
                               ▼
 tool_execution_end   ──► runningTools.delete(callId) — silent: the tool
                          finished on its own, the run continues normally
 ```
+
+The **auto-poke only fires on real stall evidence**: the agent has fully
+settled (no automatic retry or continuation left), the last run was
+interrupted (`error` / `aborted` / `length`), and a tool call is **still
+running past the threshold** — that tool's result is orphaned and the work
+would never resume on its own. A slow-but-healthy `bash` call in a live run is
+never poked.
 
 > **Notification policy:** poke never announces observations (a tool *started*,
 > a tool *finished late*). Every user-facing notification corresponds to an
@@ -225,10 +237,12 @@ tool_execution_end   ──► runningTools.delete(callId) — silent: the tool
 
 Sometimes you can see a stall the heuristics cannot: the agent sits idle in
 the middle of a task. Typing `/poke` with no arguments is the manual override
-— it sends the model a `[Poke] Manual poke from the user… resume the work`
-message:
+— it sends the model a `[Poke] Manual poke… resume the work` message:
 
-- **Idle agent** → the message is sent immediately and starts a new turn.
+- The message is a **silent custom message** (`display: false`): it stays in
+  the LLM context and starts the response, but it does **not** appear in the
+  transcript as if the user had typed it — no context pollution.
+- **Idle agent** → `triggerTurn` starts a new turn immediately.
 - **Busy agent** (e.g. a long tool is still running) → the message is queued
   as a `steer` and delivered once the current assistant turn finishes its tool
   calls.
@@ -318,15 +332,18 @@ resume automatically. Resume the work where it left off…
 
 Aborts bash commands, network calls or accidental infinite processes that run past 30s.
 
-### Long-running background work
+### Stalled runs with an orphaned tool
 
 ```bash
 /poke enable
-/poke threshold 120
-/poke config        # enable auto-poke, disable auto-abort
+/poke config        # auto-poke on (default), auto-abort off
 ```
 
-After 2 minutes poke asks the model "is it still in progress?" — a gentle nudge for servers that occasionally stall mid-tool.
+If the model crashes while a tool call is still executing (a local model that
+drops the stream mid-tool, with or without compaction), the run settles but
+the tool keeps running past the threshold — its result would be orphaned.
+poke detects that the agent is idle with an interrupted last run and a tool
+still running, and asks the model to resume the work.
 
 ### Manual kick when the agent looks stuck
 
@@ -337,24 +354,32 @@ task, kick it:
 /poke
 ```
 
-Sends the model a `[Poke] Manual poke from the user… resume the work where it
-left off` message and starts a new turn. Useful right after the stall scenario
-above when the automatic post-compaction poke already gave up (anti-loop), or
-any time you spot an idle agent before the heuristics do.
+Sends the model a `[Poke] Manual poke… resume the work where it left off`
+message as a **silent custom message** (it does not clutter the transcript as
+if the user had typed it) and starts a new turn. Useful right after the stall
+scenario above when the automatic post-compaction poke already gave up
+(anti-loop), or any time you spot an idle agent before the heuristics do.
 
 ## Troubleshooting & FAQ
 
 **Q: I ran `/poke enable` but nothing happens on long tool calls.**
-The threshold might be too high for your workflow, or no tool call has crossed it yet. Check `/poke status`; try `/poke threshold 10` and run `!sleep 15`.
+The threshold might be too high for your workflow, or no tool call has crossed
+it yet. Keep in mind that a slow-but-healthy tool in a live run is **never**
+auto-poked by design — the run picks the result up and continues. To test the
+actions: enable auto-abort (`/poke config`), set `/poke threshold 10` and run
+`!sleep 30` (it aborts at 10s); or reproduce the post-compaction/orphan stall
+scenarios from the use cases. `!sleep 15` above the threshold just completes
+normally and stays silent.
 
 **Q: I ran a slow `bash` command and poke didn't say anything. Is it broken?**
 No. That is by design: a tool that finishes on its own — even after the
 threshold — is not a stall, and poke stays silent. Poke only notifies when it
 enters into action: it aborts an overdue tool (`autoAbort`), sends an auto-poke
-to the model (`autoPoke`), or resumes the turn after a compaction stall. If you
-want the model to be nudged about genuinely long calls, keep `autoPoke` on; if
-you only want the post-compaction wake-up, disable both to watch quietly (the
-footer still marks overdue tools with `⚠️ tool 45s`).
+when a tool call outlives its interrupted run (`autoPoke`), or resumes the turn
+after a compaction stall. The auto-poke deliberately never fires for a slow
+but healthy tool in a live run — that run will pick the result up and continue
+by itself. If you only want the post-compaction wake-up, disable both to watch
+quietly (the footer still marks overdue tools with `⚠️ tool 45s`).
 
 **Q: Why didn't poke fire after my `/compact`?**
 By design. Manual compaction never interrupts work — poke only reacts to *automatic* compaction (threshold/overflow) that cut an in-flight turn.
@@ -377,7 +402,7 @@ pi-poke/
 │   ├── config.ts    # settings.json reader (lazy — only on session restore)
 │   └── ui.ts        # /poke config TUI dialog (lazy — only when opened)
 ├── test/
-│   └── sim-postcompact.ts   # state-machine simulator, 32 assertions, no TUI needed
+│   └── sim-postcompact.ts   # state-machine simulator, 42 assertions, no TUI needed
 ├── docs/            # banner + preview images
 ├── config.example.json
 ├── package.json
@@ -391,7 +416,7 @@ pi-poke/
 ```bash
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "32 passed, 0 failed"
+# Expect: "42 passed, 0 failed"
 ```
 
 The simulator replicates the exact wake-up state machine and validates the key scenarios: the reported stall bug, overflow recovery (success/failure), mid-run compaction, healthy completion, manual compaction, user aborts, anti-loop limits, user-input cancellation, failed compaction, and post-run threshold compaction.
