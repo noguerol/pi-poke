@@ -4,7 +4,7 @@
  * without needing a TUI session.
  *
  * Run: node --experimental-strip-types test/sim-postcompact.ts
- * Expect: "28 passed, 0 failed"
+ * Expect: "32 passed, 0 failed"
  */
 type Phase = "idle" | "running" | "between_runs";
 type WakePhase = "armed" | "watching";
@@ -54,6 +54,11 @@ class PokeSim {
 	input() {
 		this.wake = null;
 		this.pokeCount = 0;
+	}
+	manualPoke() {
+		// Typing /poke is an explicit user action: for the wake-up state machine
+		// it behaves like user input (cancels pending wakes, resets the counter).
+		this.input();
 	}
 	settled(): boolean {
 		this.runPhase = "idle";
@@ -219,6 +224,20 @@ console.log("\n[10] Threshold compaction after a completed run -> no poke");
 	s.compact(false);                        // post-run threshold
 	check("no wake (run ok)", s.wake === null);
 	check("settle -> no poke", s.settled() === false);
+}
+
+// ============ Scenario 11: manual /poke cancels the pending wake ============
+console.log("\n[11] Manual /poke (user kick) cancels a pending automatic wake");
+{
+	const s = new PokeSim();
+	s.agent_start();
+	s.agent_end("error");
+	s.compact(false);            // stalled after compaction, auto-poke pending
+	check("wake armed", s.wake?.phase === "armed");
+	s.manualPoke();              // the user types /poke
+	check("wake cancelled by manual poke", s.wake === null);
+	check("anti-loop counter reset", s.pokeCount === 0);
+	check("settle -> no automatic poke (user took control)", s.settled() === false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

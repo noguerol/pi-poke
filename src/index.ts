@@ -15,6 +15,8 @@
  * the turn by asking the model to continue.
  *
  * Commands:
+ *   /poke - Manual poke: send a "resume" message to the model when the
+ *           agent looks stuck or idle (works even if auto-poke is off)
  *   /poke config - Open the extension configuration dialog
  *   /poke status - Show current state
  *   /poke enable / /poke disable - Enable/disable auto-poke
@@ -285,9 +287,46 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	/**
+	 * Manual poke: the user typed /poke (no arguments) because the agent looks
+	 * stuck or idle. Unlike the automatic pokes this is an explicit user
+	 * action: it works regardless of the enabled/autoPoke/postCompactPoke
+	 * toggles and cancels any pending automatic wake (the user took control).
+	 * Returns true when the message was handed to the runtime.
+	 */
+	async function sendManualPoke(ctx: ExtensionContext): Promise<boolean> {
+		const message = [
+			"[Poke] Manual poke from the user: the session appeared to be stuck.",
+			"Resume the work where it left off: review the current state and continue the last task in progress.",
+			"If the work was already complete, reply briefly with the final state.",
+		].join("\n");
+
+		// The user took control: cancel any pending automatic wake and reset
+		// the anti-loop counter so a later stall episode can auto-poke again.
+		wake = null;
+		postCompactPokeCount = 0;
+
+		try {
+			// Idle -> send immediately (triggers a new turn). Busy (e.g. a long
+			// tool is still executing) -> queue as a steer, delivered once the
+			// current assistant turn finishes its tool calls.
+			const result: unknown = ctx.isIdle()
+				? sessionApi.sendUserMessage(message)
+				: sessionApi.sendUserMessage(message, { deliverAs: "steer" });
+			if (result && typeof (result as Promise<void>).catch === "function") {
+				await (result as Promise<void>);
+			}
+			return true;
+		} catch (err) {
+			const messageText = err instanceof Error ? err.message : String(err);
+			ctx.ui.notify(`⚠️ Manual poke failed: ${messageText}`, "error");
+			return false;
+		}
+	}
+
 	// Register the /poke command
 	pi.registerCommand("poke", {
-		description: "Configure auto-poke for long tool calls and the post-compaction wake-up",
+		description: "Poke the agent manually (/poke) or configure auto-poke and the post-compaction wake-up",
 		getArgumentCompletions: (prefix) => {
 			const subs = ["config", "enable", "disable", "status", "threshold", "postcompact"];
 			const first = prefix.trim().split(/\s+/)[0]?.toLowerCase();
@@ -309,9 +348,17 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
-			const subcommand = parts[0]?.toLowerCase();
+			const subcommand = (parts[0] ?? "").toLowerCase();
 
 			switch (subcommand) {
+				case "poke":
+				case "now":
+				case "": // bare /poke → manual poke
+					if (await sendManualPoke(ctx)) {
+						ctx.ui.notify("📌 Manual poke sent — asking the agent to continue", "info");
+					}
+					break;
+
 				case "config":
 					// TUI dialog — lazy lib
 					const { showConfigDialog } = await import("./ui.ts");
@@ -374,6 +421,8 @@ export default function pokeExtension(pi: ExtensionAPI) {
 						`  Post-compaction poke: ${state.postCompactPoke ? "✅ yes" : "❌ no"}`,
 						`  Post-compaction cooldown: ${state.postCompactCooldownSeconds}s (max ${state.postCompactMaxPokes} pokes)`,
 						`  Tools running: ${runningTools.size}`,
+						"",
+						"Manual poke: type /poke with no arguments to kick the agent back into action",
 					].join("\n");
 					ctx.ui.notify(statusText, "info");
 			}
