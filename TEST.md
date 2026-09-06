@@ -160,10 +160,10 @@ pi
 
 ### 11b. Logic simulator (automated)
 ```bash
-# Runs the state machine in isolation (no TUI) and validates 42 assertions
+# Runs the state machine in isolation (no TUI) and validates 57 assertions
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "42 passed, 0 failed"
+# Expect: "57 passed, 0 failed"
 ```
 
 ### 12. Bug scenario: error after compaction (local model)
@@ -203,8 +203,27 @@ npm test
 
 ### 16. Anti-loop
 1. With a broken local model, force the bug scenario repeatedly.
-2. **Expected result:** at most 2 pokes 30s apart; then poke stops insisting
-   until the work completes or the user sends input.
+2. **Expected result:** at most `maxPokes` pokes (default 2) per episode; if a
+   watched resume fails before the cooldown expires, poke schedules the retry
+   for when it expires (footer `🔁 retry in Ns`) instead of giving up silently.
+   After the last attempt it notifies `⏹️ Post-compaction poke gave up` and
+   stops until the work completes, the user sends input, or `/poke`.
+
+### 16b. Poke resume fails again -> automatic retry (reported bug)
+1. Reproduce the bug scenario (12) but with a model that also times out when
+   responding to poke's first resume message:
+   ```
+   Error: Retry failed after 2 attempts: Request timed out.
+   📌 Sending post-compaction poke: resume interrupted turn
+   [Poke] Context compaction finished (~117k tokens compacted)...
+   Error: Request timed out.
+   ```
+2. **Expected result (fixed):** poke does NOT give up after the second
+   timeout. It watches the poke-triggered turn, notifies `📌 Resume failed —
+   poke again in ~Ns` and sends a second resume message when the cooldown
+   expires — the session continues on its own, like typing "continue" would.
+3. If the model is truly broken, poke stops after `maxPokes` with the
+   `⏹️ gave up` notification and leaves the manual `/poke` as the escape hatch.
 
 ### 17. User input cancels the pending wake
 1. Force the bug scenario (12).

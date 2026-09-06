@@ -185,6 +185,7 @@ gains a short transient suffix that disappears when the situation clears:
 | `📌 p:on ⏳ bash` | A tool call is running |
 | `📌 p:on ⚠️ bash 45s` | Tool call exceeded the threshold |
 | `📌 p:on 👀 post-compact` | Post-compaction wake armed, watching |
+| `📌 p:on 🔁 retry in 25s` | Failed resume — next poke scheduled at cooldown expiry |
 | `📌 p:on 📤 resume` | Post-compaction poke sent |
 
 Examples:
@@ -266,37 +267,42 @@ Poke listens to the pi lifecycle events and runs a tiny state machine:
         │                                   │
         │  agent_settled (no turn resumed)  │  agent_settled
         ▼                                   ├─ run ended ok ──► clear (no poke)
-     POKE "resume the work"                 └─ run ended error/length ──► POKE
+     POKE "resume the work"                └─ run ended error/length ──► POKE
+        │                                        (within cooldown? schedule the
+        └─► wake is KEPT: the poke's own turn     retry for when it expires;
+            is watched the same way (turn_start   else poke now; max 2/episode)
+            → watching). A failed poke-resume
+            is retried automatically.
 ```
 
 | Event | Role in the state machine |
 |---|---|
 | `session_compact` / `session_compact_failed` | Arms the wake if automatic compaction interrupted in-flight work |
-| `turn_start` | A turn resumed → switch from *armed* to *watching* |
+| `turn_start` | A turn resumed (pi's own resume **or the poke's**) → switch from *armed* to *watching* |
 | `agent_end` | Records how the last run ended (`stopReason`: `error`, `aborted`, `length`, …) |
-| `agent_settled` | The agent is fully idle → decide: poke, or clear the wake |
-| `input` | The user took control → cancel the wake |
+| `agent_settled` | The agent is fully idle → decide: poke (now or scheduled) or clear the wake |
+| `input` | **User** input (typed/RPC) cancels the wake; poke's own injected messages (`source: "extension"`) do not |
 
 **When does it poke?**
 
-- The wake is **armed** and the agent settles **without any turn resuming** → the run died after compaction → poke immediately.
-- The wake is **watching** and the resumed run **ends in `error` or `length`** (truncated) → the continuation also failed → poke again (bounded).
+- The wake is **armed** and the agent settles **without any turn resuming** → the run died after compaction → poke.
+- The wake is **watching** and the resumed run **ends in `error` or `length`** (truncated) → the continuation also failed → poke again (bounded). This includes the turn started by poke's own previous message: if that resume times out too, poke does **not** give up silently — it retries once the cooldown expires (a manual "continue" usually works on a later attempt).
 - A run ends with `aborted` (user pressed Esc) → **never** pokes; the user's decision is respected.
 
 **When does it stay silent?**
 
 - Manual compaction (`/compact`) — the user asked for it; nothing was interrupted.
 - Compaction after a run that completed successfully — the work is done.
-- Any user input — the user is in control; the wake is cancelled.
+- Any user input — the user is in control; the wake is cancelled (a scheduled retry is dropped too).
 
 ### 3. Anti-loop safeguards
 
 A genuinely broken local model could otherwise cause an endless poke cycle:
 
-- **Cooldown** (`postCompactCooldownSeconds`, default 30s) — at least N seconds between pokes.
-- **Max pokes per episode** (`postCompactMaxPokes`, default 2) — after 2 failed recovery attempts poke stops insisting.
-- The poke counter **resets** after a healthy cycle (work completes) or when the user sends new input.
-- Deferred pokes are cancelled if the **session changes** (`/new`, `/resume`, `/tree`) while a poke is scheduled.
+- **Cooldown** (`postCompactCooldownSeconds`, default 30s) — at least N seconds between pokes. If a watched resume fails sooner, poke schedules the next attempt for when the cooldown expires (footer `🔁 retry in Ns`) instead of giving up.
+- **Max pokes per episode** (`postCompactMaxPokes`, default 2) — after 2 failed recovery attempts poke stops insisting and notifies `⏹️ … gave up — type /poke to resume manually`.
+- The poke counter **resets** after a healthy cycle (work completes) or when the user sends input.
+- Deferred pokes are cancelled if the **session changes** (`/new`, `/resume`, `/tree`) or the **user sends input** while one is scheduled.
 
 ## Use cases
 
@@ -387,8 +393,19 @@ By design. Manual compaction never interrupts work — poke only reacts to *auto
 **Q: I pressed Esc and poke still fired.**
 It shouldn't. If a poke arrives after a user abort, it means the abort did *not* stop the run (`stopReason` was `error`, not `aborted` — the local model dropped the stream). That is exactly the stall poke is meant to recover from. If you find it noisy, use `/poke postcompact off`.
 
+**Q: My resumed turn timed out and poke only tried once. Why?**
+That was a bug, now fixed: poke used to clear its wake before sending the poke,
+so a poke-triggered resume that failed (e.g. `Request timed out.`) was never
+watched and no retry happened — leaving the session hung until you typed
+"continue". Now the wake survives the poke: the poke's own turn is watched and,
+if it fails, poke retries once the cooldown expires (footer `🔁 retry in Ns`),
+up to `postCompactMaxPokes` attempts per episode.
+
 **Q: Poke stopped after a couple of attempts. Is it broken?**
-No — that's the anti-loop safeguard. If the model keeps failing after 2 pokes, poke gives up on that episode to avoid a poke storm. It resumes on the next stall episode once a healthy cycle (or new input) resets the counter.
+No — that's the anti-loop safeguard. If the model keeps failing after 2 pokes,
+poke gives up on that episode (with a `⏹️ gave up` notification) to avoid a poke
+storm. It resumes on the next stall episode once a healthy cycle (or new input)
+resets the counter — or you can kick it manually with `/poke` at any time.
 
 **Q: Will poke run the agent while I'm away doing something else?**
 Only in the narrow stall scenario above, and bounded by the anti-loop limits. It never executes tools by itself — it only sends a text message asking the model to continue.
@@ -402,7 +419,7 @@ pi-poke/
 │   ├── config.ts    # settings.json reader (lazy — only on session restore)
 │   └── ui.ts        # /poke config TUI dialog (lazy — only when opened)
 ├── test/
-│   └── sim-postcompact.ts   # state-machine simulator, 42 assertions, no TUI needed
+│   └── sim-postcompact.ts   # state-machine simulator, 57 assertions, no TUI needed
 ├── docs/            # banner + preview images
 ├── config.example.json
 ├── package.json
@@ -416,7 +433,7 @@ pi-poke/
 ```bash
 npm test
 # or: node --experimental-strip-types test/sim-postcompact.ts
-# Expect: "42 passed, 0 failed"
+# Expect: "57 passed, 0 failed"
 ```
 
 The simulator replicates the exact wake-up state machine and validates the key scenarios: the reported stall bug, overflow recovery (success/failure), mid-run compaction, healthy completion, manual compaction, user aborts, anti-loop limits, user-input cancellation, failed compaction, and post-run threshold compaction.

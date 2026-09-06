@@ -66,8 +66,12 @@ interface PostCompactWake {
 	errorMessage?: string;
 	tokensBefore?: number;
 	/**
-	 * "armed"    -> compaction happened but no turn has resumed yet
-	 * "watching" -> a turn started after the compaction; we watch how it ends
+	 * "armed"    -> compaction happened but no turn has resumed yet; pokes keep
+	 *               it armed until a turn actually starts
+	 * "watching" -> a turn started after the compaction — either pi resumed on
+	 *               its own or our own poke did; we watch how it ends. If the
+	 *               watched turn fails, the next settle pokes again (bounded by
+	 *               the anti-loop budget and cooldown).
 	 */
 	phase: "armed" | "watching";
 }
@@ -97,6 +101,8 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	let lastRunErrorMessage: string | undefined;
 	let postCompactPokeCount = 0;
 	let lastPostCompactPokeAt = 0;
+	// One-shot timer for a retry poke delayed by the anti-loop cooldown.
+	let wakeRetryTimer: NodeJS.Timeout | null = null;
 	// The session-bound API: the pi captured at load time, or the fresh context
 	// received via withSession() after a session replacement (newSession, fork,
 	// switchSession, /resume). After a replacement the captured pi is stale and
@@ -141,6 +147,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 	// Reset the post-compaction wake-up state
 	function resetPostCompactState() {
+		clearWakeRetryTimer();
 		wake = null;
 		runPhase = "idle";
 		lastRunStopReason = undefined;
@@ -179,6 +186,8 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		},
 		ctx: ExtensionContext,
 	) {
+		// A new episode supersedes any pending retry from the previous one.
+		clearWakeRetryTimer();
 		wake = {
 			compactionAt: Date.now(),
 			reason: params.reason,
@@ -230,6 +239,88 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			`Resume the work where it left off: review the compaction summary and continue the last task in progress.`,
 			`If the work was already complete, reply briefly with the final state.`,
 		].join("\n");
+	}
+
+	// Cancel a pending cooldown-retry poke (user input, session change, a new
+	// wake episode, or giving up).
+	function clearWakeRetryTimer() {
+		if (wakeRetryTimer) {
+			clearTimeout(wakeRetryTimer);
+			wakeRetryTimer = null;
+		}
+	}
+
+	/**
+	 * Actually send the resume poke. The wake is KEPT: the poke message starts
+	 * a new turn (turn_start -> phase "watching"), so if that resumed turn
+	 * fails too, the next settle can retry under the anti-loop budget — a
+	 * manual "continue" from the user proves the failure is often transient.
+	 * The send is deferred 300ms and skipped if the user took control meanwhile.
+	 */
+	function sendPostCompactPoke(ctx: ExtensionContext): void {
+		postCompactPokeCount++;
+		lastPostCompactPokeAt = Date.now();
+
+		const message = buildPostCompactPokeMessage(wake!);
+
+		ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
+		ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
+
+		setTimeout(() => {
+			// The user may have taken control or disabled it meanwhile
+			if (!state.enabled || !state.postCompactPoke || !wake) {
+				return;
+			}
+			sendGuardedUserMessage(message, ctx);
+		}, 300);
+	}
+
+	/**
+	 * Anti-loop gate for the post-compaction poke. Respects the budget
+	 * (maxPokes per episode) and the cooldown. When the last poke is too
+	 * recent but attempts are left, schedule the next one for when the cooldown
+	 * expires instead of giving up silently: a transient failure (e.g. a
+	 * request timeout) usually succeeds on a later attempt.
+	 */
+	function schedulePostCompactPoke(ctx: ExtensionContext): void {
+		const cooldownMs = state.postCompactCooldownSeconds * 1000;
+		const now = Date.now();
+
+		// Out of attempts: stop insisting this episode. The counter resets on a
+		// healthy cycle or when the user sends input (or /poke).
+		if (postCompactPokeCount >= state.postCompactMaxPokes) {
+			clearWakeRetryTimer();
+			wake = null;
+			setPokeStatus(ctx);
+			ctx.ui.notify("⏹️ Post-compaction poke gave up (max attempts) — type /poke to resume manually", "info");
+			return;
+		}
+
+		const waitMs = lastPostCompactPokeAt + cooldownMs - now;
+		if (waitMs > 0) {
+			if (wakeRetryTimer) {
+				return; // already scheduled
+			}
+			const waitSec = Math.max(1, Math.round(waitMs / 1000));
+			ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("dim", `🔁 retry in ${waitSec}s`)));
+			ctx.ui.notify(`📌 Resume failed — poke again in ~${waitSec}s`, "info");
+			wakeRetryTimer = setTimeout(() => {
+				wakeRetryTimer = null;
+				// Re-validate: state may have changed while waiting
+				if (!state.enabled || !state.postCompactPoke || !wake) {
+					return;
+				}
+				if (postCompactPokeCount >= state.postCompactMaxPokes) {
+					wake = null;
+					setPokeStatus(ctx);
+					return;
+				}
+				sendPostCompactPoke(ctx);
+			}, waitMs);
+			return;
+		}
+
+		sendPostCompactPoke(ctx);
 	}
 
 	/**
@@ -388,6 +479,7 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 		// The user took control: cancel any pending automatic wake and reset
 		// the anti-loop counter so a later stall episode can auto-poke again.
+		clearWakeRetryTimer();
 		wake = null;
 		postCompactPokeCount = 0;
 
@@ -462,6 +554,10 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 				case "disable":
 					state.enabled = false;
+					// Cancel any pending recovery: the extension is being switched off.
+					clearWakeRetryTimer();
+					wake = null;
+					postCompactPokeCount = 0;
 					persistState(ctx);
 					ctx.ui.notify("⏸️ Auto-poke disabled", "info");
 					setPokeStatus(ctx);
@@ -559,10 +655,12 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	//
 	// Signals:
 	//   - session_compact / session_compact_failed: compaction (auto)
-	//   - turn_start: a turn resumed -> we watch how it ends
+	//   - turn_start: a turn resumed (pi's own resume OR our poke's) -> watch
 	//   - agent_end: outcome of the last run (error? abort? ok)
-	//   - agent_settled: the run fully settled -> decide poke or clean up
-	//   - input: the user took control -> cancel
+	//   - agent_settled: the run fully settled -> decide poke, schedule a
+	//     cooldown retry, or clean up
+	//   - input (user, source "interactive"/"rpc"): the user took control ->
+	//     cancel; our own pokes (source "extension") must not cancel the wake
 	// =========================================================================
 
 	// A new run starts (prompt or continue)
@@ -644,37 +742,22 @@ export default function pokeExtension(pi: ExtensionAPI) {
 			wake = null;
 		}
 
-		// Post-compaction wake decision (unchanged): when a wake is armed and
-		// auto-poke for it is on, decide here whether the interrupted turn needs
-		// a poke or the work recovered on its own.
+		// Post-compaction wake decision: when a wake is armed and auto-poke for
+		// it is on, decide here whether the interrupted turn needs a poke or the
+		// work recovered on its own.
 		if (wake && state.postCompactPoke) {
-			const now = Date.now();
-
-			let shouldPoke = false;
-			if (wake.phase === "armed") {
-				// No turn ever resumed after the compaction: the run died.
-				shouldPoke = true;
-			} else if (wake.phase === "watching") {
-				// The resume turn started but the run ended failed (error or
-				// truncated). An "aborted" here means the user pressed Esc during
-				// the resume: do not poke.
-				shouldPoke = isFailedStopReason(lastRunStopReason);
-			}
+			// "armed": no turn resumed after the compaction -> the run died,
+			// poke now. "watching": a resume turn (pi's or our own poke's)
+			// ended -> poke only if it failed (error/truncated). An "aborted"
+			// means the user pressed Esc during the resume: never re-poke.
+			const shouldPoke = wake.phase === "armed" ? true : isFailedStopReason(lastRunStopReason);
 
 			if (!shouldPoke) {
-				// The work continued and finished fine: nothing to do. A healthy
-				// cycle resets the poke counter for future episodes.
+				// The work continued and finished fine (or the user aborted the
+				// resume): nothing to do. A healthy cycle cancels any scheduled
+				// retry and resets the poke counter for future episodes.
+				clearWakeRetryTimer();
 				postCompactPokeCount = 0;
-				setPokeStatus(ctx);
-				wake = null;
-				return;
-			}
-
-			// Anti-loop limits: they apply only to real pokes. If we poked recently
-			// or ran out of attempts, stop insisting (the local model might be truly
-			// broken); a later healthy cycle does reset the counter.
-			const cooldownMs = state.postCompactCooldownSeconds * 1000;
-			if (now - lastPostCompactPokeAt < cooldownMs || postCompactPokeCount >= state.postCompactMaxPokes) {
 				setPokeStatus(ctx);
 				wake = null;
 				return;
@@ -682,45 +765,19 @@ export default function pokeExtension(pi: ExtensionAPI) {
 
 			// Non-interactive modes: do not restart the agent on our own.
 			if (ctx.mode === "print" || ctx.mode === "json") {
+				clearWakeRetryTimer();
 				setPokeStatus(ctx);
 				wake = null;
 				return;
 			}
 
-			postCompactPokeCount++;
-			lastPostCompactPokeAt = now;
+			// The watched resume failed: refresh the error surfaced to the model
+			// so a retry explains the latest failure.
+			if (wake.phase === "watching" && lastRunErrorMessage) {
+				wake.errorMessage = lastRunErrorMessage;
+			}
 
-			const message = buildPostCompactPokeMessage(wake);
-			wake = null; // clear before sending to avoid loops
-
-			ctx.ui.setStatus("poke", pokeStatusText(ctx, ctx.ui.theme.fg("warning", "📤 resume")));
-			ctx.ui.notify("📌 Sending post-compaction poke: resume interrupted turn", "info");
-
-			setTimeout(() => {
-				// The user may have disabled it meanwhile
-				if (!state.enabled || !state.postCompactPoke) {
-					return;
-				}
-				// sessionApi is always bound to the current session (rebound via
-				// withSession on replacements), so a deferred poke targets the live
-				// session even if it changed while the timer was pending.
-				// The pi API types sendUserMessage as void, but the runtime returns a
-				// Promise: guard it so a stale or broken binding cannot crash pi.
-				let result: unknown;
-				try {
-					result = sessionApi.sendUserMessage(message);
-				} catch (err) {
-					const messageText = err instanceof Error ? err.message : String(err);
-					ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
-					return;
-				}
-				if (result && typeof (result as Promise<void>).catch === "function") {
-					(result as Promise<void>).catch((err: unknown) => {
-						const messageText = err instanceof Error ? err.message : String(err);
-						ctx.ui.notify(`⚠️ Post-compaction poke failed: ${messageText}`, "error");
-					});
-				}
-			}, 300);
+			schedulePostCompactPoke(ctx);
 			return;
 		}
 
@@ -737,8 +794,15 @@ export default function pokeExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	// The user (or another extension) sent input: they took control, cancel wake
-	pi.on("input", async (_event, _ctx) => {
+	// User input (typed/RPC) cancels the wake: the user took control. Our own
+	// pokes are injected as user messages (source "extension") and must NOT
+	// cancel the state machine — otherwise every poke would reset the watching
+	// phase and the anti-loop counter, and a failed resume would never retry.
+	pi.on("input", async (event, _ctx) => {
+		if (event.source === "extension") {
+			return;
+		}
+		clearWakeRetryTimer();
 		wake = null;
 		// New user direction: reset the poke counter
 		postCompactPokeCount = 0;
