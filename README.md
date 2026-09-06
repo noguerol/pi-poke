@@ -109,8 +109,9 @@ After installing, reload extensions:
 ```
 
 When the agent looks stuck at any moment — even with auto-poke off — type
-`/poke` (no arguments) for a **manual poke**: it sends the model a "resume the
-work" message and kicks the turn back into action.
+`/poke` (no arguments) for a **manual poke**: if a turn is blocked mid-run it
+interrupts it (like Esc) and then sends the model a "resume the work" message
+that kicks the turn back into action.
 
 The **post-compaction wake-up is enabled by default** once poke is enabled — nothing else to do. For local-model workflows this is the setting that matters most.
 
@@ -158,7 +159,7 @@ All options can live in the `poke` block of `~/.pi/agent/settings.json` (global)
 
 | Command | Description |
 |---|---|
-| `/poke` (no args) | **Manual poke** — send a "resume the work" message to the model when the agent looks stuck or idle. Works even if auto-poke is off; cancels any pending automatic wake |
+| `/poke` (no args) | **Manual poke** — if the agent is blocked mid-run it interrupts the turn (like Esc), then sends a silent "resume the work" message. Works even if auto-poke is off; cancels any pending automatic wake |
 | `/poke enable` | Enable the extension |
 | `/poke disable` | Disable the extension |
 | `/poke status` | Show current configuration and live state |
@@ -237,18 +238,23 @@ never poked.
 ### 1b. Manual poke (`/poke`)
 
 Sometimes you can see a stall the heuristics cannot: the agent sits idle in
-the middle of a task. Typing `/poke` with no arguments is the manual override
-— it sends the model a `[Poke] Manual poke… resume the work` message:
+the middle of a task — or a turn is blocked on a tool call / a dead stream
+that never finishes. Typing `/poke` with no arguments is the manual override:
 
-- The message is a **silent custom message** (`display: false`): it stays in
-  the LLM context and starts the response, but it does **not** appear in the
-  transcript as if the user had typed it — no context pollution.
-- **Idle agent** → `triggerTurn` starts a new turn immediately.
-- **Busy agent** (e.g. a long tool is still running) → the message is queued
-  as a `steer` and delivered once the current assistant turn finishes its tool
-  calls.
-- It works regardless of the `enabled` / `autoPoke` / `postCompactPoke`
-  toggles, and it cancels any pending automatic wake: the user took control.
+- **Idle agent** → the resume message starts a new turn immediately.
+- **Busy / blocked agent** (a tool call is still running, the stream hangs)
+  → poke **interrupts the current turn first** (same as pressing Esc: the run
+  and its tool are aborted), waits for the agent to settle, and only then
+  sends the resume message as a fresh prompt. A plain message sent while a run
+  is active would only be *queued* behind the stuck turn and never delivered —
+  that is why the poke must interrupt and resume instead of layering an
+  instruction on top.
+
+In both cases the message is a **silent custom message** (`display: false`):
+it stays in the LLM context and starts the response, but it does **not**
+appear in the transcript as if the user had typed it — no context pollution.
+It works regardless of the `enabled` / `autoPoke` / `postCompactPoke`
+toggles, and it cancels any pending automatic wake: the user took control.
 
 `/poke status` still shows the configuration.
 
@@ -362,9 +368,12 @@ task, kick it:
 
 Sends the model a `[Poke] Manual poke… resume the work where it left off`
 message as a **silent custom message** (it does not clutter the transcript as
-if the user had typed it) and starts a new turn. Useful right after the stall
-scenario above when the automatic post-compaction poke already gave up
-(anti-loop), or any time you spot an idle agent before the heuristics do.
+if the user had typed it) and starts a new turn. If the agent is blocked
+mid-run (tool call hanging, dead stream), the poke **interrupts the turn
+first** — exactly like pressing Esc and then typing "continue" — so the
+resume actually reaches the model. Useful right after the stall scenario above
+when the automatic post-compaction poke already gave up (anti-loop), or any
+time you spot an idle agent before the heuristics do.
 
 ## Troubleshooting & FAQ
 

@@ -28,7 +28,7 @@
  * command, the hooks and keeps the runtime state.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // State persisted in the session
 interface PokeState {
@@ -464,31 +464,67 @@ export default function pokeExtension(pi: ExtensionAPI) {
 	}
 
 	/**
+	 * Wait (polling) until the agent is idle, with a timeout.
+	 */
+	async function waitUntilIdle(ctx: ExtensionContext, timeoutMs: number): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (!ctx.isIdle()) {
+			if (Date.now() > deadline) {
+				return false;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		return true;
+	}
+
+	/**
 	 * Manual poke: the user typed /poke (no arguments) because the agent looks
 	 * stuck or idle. Unlike the automatic pokes this is an explicit user
 	 * action: it works regardless of the enabled/autoPoke/postCompactPoke
 	 * toggles and cancels any pending automatic wake (the user took control).
 	 * Returns true when the message was handed to the runtime.
 	 */
-	async function sendManualPoke(ctx: ExtensionContext): Promise<boolean> {
-		const message = [
-			"[Poke] Manual poke from the user: the session appeared to be stuck.",
-			"Resume the work where it left off: review the current state and continue the last task in progress.",
-			"If the work was already complete, reply briefly with the final state.",
-		].join("\n");
-
+	async function sendManualPoke(ctx: ExtensionCommandContext): Promise<boolean> {
 		// The user took control: cancel any pending automatic wake and reset
 		// the anti-loop counter so a later stall episode can auto-poke again.
 		clearWakeRetryTimer();
 		wake = null;
 		postCompactPokeCount = 0;
 
+		const message = [
+			"[Poke] Manual poke from the user: the session appeared to be stuck.",
+			"Resume the work where it left off: review the current state and continue the last task in progress.",
+			"If the work was already complete, reply briefly with the final state.",
+		].join("\n");
+
+		// A message injected while an agent run is active is only QUEUED as a
+		// steer and delivered between turns — a run blocked on a hung tool call
+		// or a dead stream never processes it, and an abort drops queued
+		// messages entirely. That is why a plain "instruction on top" did
+		// nothing. The user's manual Esc + "continue" works because it
+		// INTERRUPTS the run first; emulate that: abort the current operation,
+		// wait for the agent to settle, then send the resume as a fresh prompt.
+		if (!ctx.isIdle()) {
+			try {
+				ctx.ui.notify("📌 Manual poke: interrupting the current turn…", "info");
+				ctx.abort();
+				if (!(await waitUntilIdle(ctx, 10_000))) {
+					ctx.ui.notify("⚠️ Manual poke: could not interrupt the running turn", "error");
+					return false;
+				}
+			} catch (err) {
+				const messageText = err instanceof Error ? err.message : String(err);
+				ctx.ui.notify(`⚠️ Manual poke failed: ${messageText}`, "error");
+				return false;
+			}
+		}
+
 		try {
 			// Silent kick: a custom message (display:false) keeps the text out of
 			// the transcript — it does not look like the user typed it — while
 			// still participating in the LLM context. triggerTurn starts a new
-			// response when idle; while busy it is queued as a steer and
-			// delivered once the current assistant turn finishes its tool calls.
+			// response from idle (the run was just aborted, so this is a fresh
+			// prompt, not another queued message).
 			const result: unknown = (sessionApi as ExtensionAPI).sendMessage(
 				{ customType: "poke", content: message, display: false },
 				{ triggerTurn: true, deliverAs: "steer" },

@@ -232,7 +232,7 @@ npm test
 
 ## Manual poke
 
-### 18. Manual kick with `/poke`
+### 18. Manual kick with `/poke` (idle agent)
 ```bash
 # Idle agent: just type the bare command
 /poke
@@ -247,11 +247,18 @@ npm test
 # /poke status still shows the configuration (bare /poke no longer shows it)
 ```
 
-### 19. Manual poke while busy (queued as steer)
-1. Start a long task (e.g. `!sleep 60`) and type `/poke` while it runs.
-2. **Expected result:** the poke is queued (`deliverAs: steer`) and the model
-   receives it once the current assistant turn finishes executing its tools.
-   No user-looking message appears in the transcript.
+### 19. Manual poke while the turn is blocked (interrupt + resume)
+1. Start a long task (e.g. `!sleep 300`) and type `/poke` while the tool is
+   still running.
+2. **Expected result (fixed):** the poke does NOT just queue a message on top
+   (which a blocked turn would never process). Instead:
+   - notification: "📌 Manual poke: interrupting the current turn…"
+   - the running tool/turn is aborted (same as pressing Esc),
+   - when the agent settles, the resume message starts a fresh turn and the
+     model continues.
+   In the past the poke appeared to "do nothing" until the user pressed Esc
+   and typed "continue" manually — a message injected while a run is active
+   is only queued and is never delivered while the run is blocked.
 
 ### 20. Manual poke cancels a pending automatic wake
 1. Force the bug scenario (12) so an automatic post-compaction poke is about
@@ -265,6 +272,7 @@ npm test
 - [ ] The extension loads without errors
 - [ ] All commands work correctly (`config`, `status`, `enable`, `disable`,
       `threshold`, `postcompact`)
+- [ ] Bare `/poke` interrupts a blocked turn and resumes it (idle → immediate message; busy → abort + resume)
 - [ ] Bare `/poke` sends a silent manual resume message (custom message, no transcript pollution)
 - [ ] The configuration dialog is usable and includes the post-compaction toggle
 - [ ] Notifications appear only when poke enters into action (auto-abort / auto-poke / post-compaction resume)
