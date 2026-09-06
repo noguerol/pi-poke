@@ -4,7 +4,7 @@
  * without needing a TUI session.
  *
  * Run: node --experimental-strip-types test/sim-postcompact.ts
- * Expect: "42 passed, 0 failed"
+ * Expect: "57 passed, 0 failed"
  */
 type Phase = "idle" | "running" | "between_runs";
 type WakePhase = "armed" | "watching";
@@ -33,6 +33,8 @@ class PokeSim {
 	maxPokes = 2;
 	pokes: string[] = [];
 	now = Date.now();
+	// a retry poke is scheduled to fire when the cooldown expires
+	retryScheduled = false;
 
 	agent_start() {
 		this.runPhase = "running";
@@ -48,12 +50,21 @@ class PokeSim {
 	compact(willRetry: boolean, failed = false) {
 		const interrupted = willRetry || this.runPhase === "running" || isInterruptedStopReason(this.lastRunStopReason);
 		if (interrupted) {
+			// a new episode supersedes any scheduled retry
+			this.retryScheduled = false;
 			this.wake = { compactionAt: this.now, willRetry, failed, phase: "armed" };
 		}
 	}
+	// User input (typed/RPC): the user took control -> cancel the wake.
 	input() {
+		this.retryScheduled = false;
 		this.wake = null;
 		this.pokeCount = 0;
+	}
+	// Our own pokes re-enter as input events with source "extension": they
+	// must NOT cancel the wake (mirrors the source filter in index.ts).
+	inputFromExtension() {
+		// no-op
 	}
 	manualPoke() {
 		// Typing /poke is an explicit user action: for the wake-up state machine
@@ -67,18 +78,43 @@ class PokeSim {
 		if (this.wake.phase === "armed") shouldPoke = true;
 		else if (this.wake.phase === "watching") shouldPoke = isFailedStopReason(this.lastRunStopReason);
 		if (!shouldPoke) {
+			// healthy resume (or the user aborted it): clear, reset budget
+			this.retryScheduled = false;
 			this.pokeCount = 0;
 			this.wake = null;
 			return false;
 		}
-		if (this.now - this.lastPostCompactPokeAt < this.cooldownMs || this.pokeCount >= this.maxPokes) {
+		if (this.pokeCount >= this.maxPokes) {
+			// out of attempts for this episode
+			this.retryScheduled = false;
 			this.wake = null;
+			return false;
+		}
+		if (this.now - this.lastPostCompactPokeAt < this.cooldownMs) {
+			// too soon after the last poke: retry when the cooldown expires
+			this.retryScheduled = true;
 			return false;
 		}
 		this.pokeCount++;
 		this.lastPostCompactPokeAt = this.now;
 		this.pokes.push("poke");
-		this.wake = null;
+		this.retryScheduled = false;
+		// wake is KEPT: the poke message will start a turn (turn_start -> watching)
+		// so a failed resume can be retried under the anti-loop budget
+		return true;
+	}
+	// The cooldown timer fired: validate and poke if still appropriate.
+	retryFires(): boolean {
+		if (!this.retryScheduled || !this.wake) return false;
+		this.retryScheduled = false;
+		if (this.pokeCount >= this.maxPokes) {
+			this.wake = null;
+			return false;
+		}
+		if (this.now - this.lastPostCompactPokeAt < this.cooldownMs) return false;
+		this.pokeCount++;
+		this.lastPostCompactPokeAt = this.now;
+		this.pokes.push("poke");
 		return true;
 	}
 }
@@ -342,6 +378,51 @@ console.log("\n[12] Auto-poke only on stall evidence (run died with tool pending
 		loop.monitorTick();
 	}
 	check("max 2 pokes per stalled episode", loop.pokes.length === 2);
+}
+
+// ============ Scenario 13: the reported bug — poke resume fails again ============
+// Post-compaction poke #1 is sent, its own resumed turn ALSO fails (timeout).
+// Poke must not give up: it retries once the cooldown expires, like a manual
+// "continue" would — instead of leaving the session hung until the user types.
+console.log("\n[13] Poke resume fails again -> scheduled retry after the cooldown");
+{
+	const s = new PokeSim();
+	s.agent_start();
+	s.agent_end("error");       // "Request timed out."
+	s.compact(false);            // auto threshold compaction -> armed
+	check("wake armed", s.wake?.phase === "armed");
+	check("poke #1", s.settled() === true);
+	check("wake kept (watches the poke's own resume)", s.wake !== null);
+	s.turn_start();              // the poke message starts a turn
+	check("phase -> watching", s.wake?.phase === "watching");
+	s.agent_end("error");       // the resumed turn times out too
+	check("fresh failure within cooldown: no instant 2nd poke", s.settled() === false);
+	check("retry scheduled", s.retryScheduled === true);
+	check("still only 1 poke", s.pokes.length === 1);
+	s.now += 31_000;             // cooldown expires
+	check("scheduled retry fires", s.retryFires() === true);
+	check("2 pokes total", s.pokes.length === 2);
+	s.turn_start();
+	s.agent_end("stop");        // the retry resumes and completes
+	check("healthy resume clears wake + budget", s.settled() === false && s.wake === null && s.pokeCount === 0);
+}
+
+// ============ Scenario 14: extension input does not cancel the wake ============
+console.log("\n[14] Extension-source input (own pokes) does not cancel the wake");
+{
+	const s = new PokeSim();
+	s.agent_start();
+	s.agent_end("error");
+	s.compact(false);
+	check("poke #1", s.settled() === true);
+	s.inputFromExtension();      // the poke's sendUserMessage re-enters as input
+	check("wake survives extension input", s.wake !== null);
+	check("budget survives extension input", s.pokeCount === 1);
+	s.turn_start();
+	s.agent_end("error");       // poke resume fails
+	check("failed poke-resume still schedules a retry", s.settled() === false && s.retryScheduled === true);
+	s.input();                   // the user finally types -> full reset
+	check("user input cancels wake and retry", s.wake === null && s.retryScheduled === false && s.pokeCount === 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
